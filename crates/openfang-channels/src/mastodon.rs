@@ -261,10 +261,7 @@ fn parse_mastodon_notification(
     })
 }
 
-/// Simple HTML tag stripper for Mastodon status content.
-///
-/// Mastodon returns HTML in status content. This strips tags and decodes
-/// common HTML entities. For production, consider a proper HTML sanitizer.
+/// Strip HTML tags and decode entities from Mastodon status content.
 fn strip_html_tags(html: &str) -> String {
     let mut result = String::with_capacity(html.len());
     let mut in_tag = false;
@@ -278,7 +275,7 @@ fn strip_html_tags(html: &str) -> String {
             }
             '>' if in_tag => {
                 in_tag = false;
-                // Insert newline for block-level closing tags
+                // Insert newline for block-level tags
                 let tag_lower = tag_buf.to_lowercase();
                 if tag_lower.starts_with("br")
                     || tag_lower.starts_with("/p")
@@ -298,17 +295,8 @@ fn strip_html_tags(html: &str) -> String {
         }
     }
 
-    // Decode HTML entities
-    let decoded = result
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&#x27;", "'")
-        .replace("&nbsp;", " ");
-
+    // Decode HTML entities using html_escape crate
+    let decoded = html_escape::decode_html_entities(&result);
     decoded.trim().to_string()
 }
 
@@ -676,6 +664,41 @@ mod tests {
         });
 
         assert!(parse_mastodon_notification(&notif, "acct-999").is_none());
+    }
+
+    #[test]
+    fn strip_html_handles_emoji_without_panic() {
+        // This crashes the current implementation because emoji are multi-byte
+        let html = "<p>Hello 🦀 world</p>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("Hello"));
+        assert!(result.contains("🦀"));
+        assert!(result.contains("world"));
+        assert!(!result.contains("<p>"));
+    }
+
+    #[test]
+    fn strip_html_handles_cjk_without_panic() {
+        let html = "<p>こんにちは<br>世界</p>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("こんにちは"));
+        assert!(result.contains("世界"));
+    }
+
+    #[test]
+    fn strip_html_decodes_numeric_entities() {
+        let html = "curly&#8217;s &amp; &#x2019;";
+        let result = strip_html_tags(html);
+        assert!(result.contains("&"), "Should decode &amp;");
+        // Numeric entities should at least not crash
+        assert!(!result.contains("&#8217;") || result.contains("\u{2019}"));
+    }
+
+    #[test]
+    fn strip_html_basic_tags() {
+        let html = "<p>Hello <b>world</b></p>";
+        let result = strip_html_tags(html);
+        assert_eq!(result.trim(), "Hello world");
     }
 
     #[test]
