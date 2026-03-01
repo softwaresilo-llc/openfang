@@ -7,6 +7,16 @@ use crate::SkillError;
 use std::path::Path;
 use tracing::info;
 
+/// Minimal URL-encoding for query parameters.
+fn urlencoded(s: &str) -> String {
+    s.replace(' ', "+")
+        .replace('&', "%26")
+        .replace('=', "%3D")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+        .replace('/', "%2F")
+}
+
 /// FangHub registry configuration.
 #[derive(Debug, Clone)]
 pub struct MarketplaceConfig {
@@ -45,9 +55,10 @@ impl MarketplaceClient {
 
     /// Search for skills by query string.
     pub async fn search(&self, query: &str) -> Result<Vec<SkillSearchResult>, SkillError> {
+        let encoded_query = urlencoded(query);
         let url = format!(
             "{}/search/repositories?q={}+org:{}&sort=stars",
-            self.config.registry_url, query, self.config.github_org
+            self.config.registry_url, encoded_query, self.config.github_org
         );
 
         let resp = self
@@ -196,5 +207,49 @@ mod tests {
     fn test_client_creation() {
         let client = MarketplaceClient::new(MarketplaceConfig::default());
         assert_eq!(client.config.github_org, "openfang-skills");
+    }
+
+    #[test]
+    fn test_urlencoded() {
+        // Basic cases
+        assert_eq!(urlencoded("hello world"), "hello+world");
+        assert_eq!(urlencoded("twitter"), "twitter");
+
+        // Special characters that could break URL structure
+        assert_eq!(urlencoded("a&b=c"), "a%26b%3Dc");
+        assert_eq!(urlencoded("path/to#frag"), "path%2Fto%23frag");
+        assert_eq!(urlencoded("q?test"), "q%3Ftest");
+
+        // Empty string
+        assert_eq!(urlencoded(""), "");
+
+        // Multiple spaces
+        assert_eq!(urlencoded("hello world test"), "hello+world+test");
+    }
+
+    /// Test that search properly URL-encodes queries to prevent 422 errors.
+    /// See: https://github.com/RightNow-AI/openfang/issues/112
+    #[test]
+    fn test_search_query_encoding() {
+        // Verify that special characters in queries are properly encoded
+        let query_with_ampersand = "social&media";
+        let encoded = urlencoded(query_with_ampersand);
+        assert!(!encoded.contains('&'), "Ampersand should be encoded");
+        assert_eq!(encoded, "social%26media");
+
+        let query_with_equals = "key=value";
+        let encoded = urlencoded(query_with_equals);
+        assert!(!encoded.contains('='), "Equals should be encoded");
+        assert_eq!(encoded, "key%3Dvalue");
+
+        // Verify URL construction would be valid
+        let config = MarketplaceConfig::default();
+        let encoded_query = urlencoded("hello world");
+        let url = format!(
+            "{}/search/repositories?q={}+org:{}&sort=stars",
+            config.registry_url, encoded_query, config.github_org
+        );
+        assert!(url.contains("hello+world"));
+        assert!(url.starts_with("https://api.github.com/search/repositories"));
     }
 }
