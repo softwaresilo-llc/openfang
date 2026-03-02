@@ -7,16 +7,6 @@ use crate::SkillError;
 use std::path::Path;
 use tracing::info;
 
-/// Minimal URL-encoding for query parameters.
-fn urlencoded(s: &str) -> String {
-    s.replace(' ', "+")
-        .replace('&', "%26")
-        .replace('=', "%3D")
-        .replace('?', "%3F")
-        .replace('#', "%23")
-        .replace('/', "%2F")
-}
-
 /// FangHub registry configuration.
 #[derive(Debug, Clone)]
 pub struct MarketplaceConfig {
@@ -55,15 +45,11 @@ impl MarketplaceClient {
 
     /// Search for skills by query string.
     pub async fn search(&self, query: &str) -> Result<Vec<SkillSearchResult>, SkillError> {
-        let encoded_query = urlencoded(query);
-        let url = format!(
-            "{}/search/repositories?q={}+org:{}&sort=stars",
-            self.config.registry_url, encoded_query, self.config.github_org
-        );
+        let url = build_search_url(&self.config, query)?;
 
         let resp = self
             .http
-            .get(&url)
+            .get(url)
             .header("Accept", "application/vnd.github.v3+json")
             .send()
             .await
@@ -179,6 +165,18 @@ impl MarketplaceClient {
     }
 }
 
+/// Build a GitHub search URL with proper query encoding.
+fn build_search_url(config: &MarketplaceConfig, query: &str) -> Result<reqwest::Url, SkillError> {
+    let base = format!("{}/search/repositories", config.registry_url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&base)
+        .map_err(|e| SkillError::Network(format!("Invalid registry URL '{base}': {e}")))?;
+    let search = format!("{query} org:{}", config.github_org);
+    url.query_pairs_mut()
+        .append_pair("q", &search)
+        .append_pair("sort", "stars");
+    Ok(url)
+}
+
 /// A search result from the marketplace.
 #[derive(Debug, Clone)]
 pub struct SkillSearchResult {
@@ -195,6 +193,7 @@ pub struct SkillSearchResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_default_config() {
@@ -209,47 +208,26 @@ mod tests {
         assert_eq!(client.config.github_org, "openfang-skills");
     }
 
-    #[test]
-    fn test_urlencoded() {
-        // Basic cases
-        assert_eq!(urlencoded("hello world"), "hello+world");
-        assert_eq!(urlencoded("twitter"), "twitter");
-
-        // Special characters that could break URL structure
-        assert_eq!(urlencoded("a&b=c"), "a%26b%3Dc");
-        assert_eq!(urlencoded("path/to#frag"), "path%2Fto%23frag");
-        assert_eq!(urlencoded("q?test"), "q%3Ftest");
-
-        // Empty string
-        assert_eq!(urlencoded(""), "");
-
-        // Multiple spaces
-        assert_eq!(urlencoded("hello world test"), "hello+world+test");
-    }
-
-    /// Test that search properly URL-encodes queries to prevent 422 errors.
-    /// See: https://github.com/RightNow-AI/openfang/issues/112
+    /// Search URL should preserve the logical query while applying URL encoding.
     #[test]
     fn test_search_query_encoding() {
-        // Verify that special characters in queries are properly encoded
-        let query_with_ampersand = "social&media";
-        let encoded = urlencoded(query_with_ampersand);
-        assert!(!encoded.contains('&'), "Ampersand should be encoded");
-        assert_eq!(encoded, "social%26media");
-
-        let query_with_equals = "key=value";
-        let encoded = urlencoded(query_with_equals);
-        assert!(!encoded.contains('='), "Equals should be encoded");
-        assert_eq!(encoded, "key%3Dvalue");
-
-        // Verify URL construction would be valid
         let config = MarketplaceConfig::default();
-        let encoded_query = urlencoded("hello world");
-        let url = format!(
-            "{}/search/repositories?q={}+org:{}&sort=stars",
-            config.registry_url, encoded_query, config.github_org
+        let query = "social&media key=value /path?x=1#frag +50%";
+        let url = build_search_url(&config, query).expect("search URL should build");
+
+        // Parse decoded query params to ensure original semantics are preserved.
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(params.get("sort"), Some(&"stars".to_string()));
+        assert_eq!(
+            params.get("q"),
+            Some(&format!("{query} org:{}", config.github_org))
         );
-        assert!(url.contains("hello+world"));
-        assert!(url.starts_with("https://api.github.com/search/repositories"));
+
+        // Raw URL must contain percent-encoded bytes for reserved characters.
+        let raw = url.as_str();
+        assert!(raw.contains("%26")); // &
+        assert!(raw.contains("%3D")); // =
+        assert!(raw.contains("%23")); // #
+        assert!(raw.contains("%25")); // %
     }
 }
