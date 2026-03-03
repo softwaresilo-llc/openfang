@@ -1879,6 +1879,18 @@ fn build_field_json(
     f: &ChannelField,
     config_values: Option<&serde_json::Value>,
 ) -> serde_json::Value {
+    fn lookup_config_value(config: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
+        if let Some(v) = config.get(key) {
+            return Some(v.clone());
+        }
+        // Support dotted keys like "voice.reply_mode" by descending nested objects.
+        let mut current = config;
+        for part in key.split('.') {
+            current = current.get(part)?;
+        }
+        Some(current.clone())
+    }
+
     let has_value = f
         .env_var
         .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
@@ -1896,8 +1908,8 @@ fn build_field_json(
     // For non-secret fields, include the actual saved config value so the
     // dashboard can pre-populate forms when editing existing configs.
     if f.env_var.is_none() {
-        if let Some(obj) = config_values.and_then(|v| v.as_object()) {
-            if let Some(val) = obj.get(f.key) {
+        if let Some(config) = config_values {
+            if let Some(val) = lookup_config_value(config, f.key) {
                 // Convert arrays to comma-separated string for list fields
                 let display_val = if f.field_type == FieldType::List {
                     if let Some(arr) = val.as_array() {
@@ -1912,13 +1924,18 @@ fn build_field_json(
                                 .join(", "),
                         )
                     } else {
-                        val.clone()
+                        val
                     }
                 } else {
-                    val.clone()
+                    val
                 };
                 field["value"] = display_val;
-                if !val.is_null() && val.as_str().map(|s| !s.is_empty()).unwrap_or(true) {
+                if !field["value"].is_null()
+                    && field["value"]
+                        .as_str()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(true)
+                {
                     field["has_value"] = serde_json::Value::Bool(true);
                 }
             }
