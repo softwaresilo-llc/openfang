@@ -15,6 +15,7 @@ function channelsPage() {
     loading: true,
     loadError: '',
     pollTimer: null,
+    availableAgents: [],
 
     // Setup flow step tracking
     setupStep: 1, // 1=Configure, 2=Verify, 3=Ready
@@ -77,21 +78,44 @@ function channelsPage() {
       return this.setupModal.fields.filter(function(f) { return f.advanced; });
     },
 
-    whatsappVoiceFields() {
+    whatsappAdvancedFields() {
       if (!this.setupModal || !this.setupModal.fields || this.setupModal.name !== 'whatsapp') return [];
-      return this.setupModal.fields.filter(function(f) { return f.key.indexOf('voice.') === 0; });
+      return this.setupModal.fields.filter(function(f) {
+        return f.key.indexOf('voice.') === 0 || f.key === 'default_agent';
+      });
     },
 
-    hasWhatsappVoiceFields() {
-      return this.whatsappVoiceFields().length > 0;
+    hasWhatsappAdvancedFields() {
+      return this.whatsappAdvancedFields().length > 0;
     },
 
     hasAdvanced() {
       return this.advancedFields().length > 0;
     },
 
+    isDefaultAgentField(field) {
+      return !!field && field.key === 'default_agent';
+    },
+
     isQrChannel() {
       return this.setupModal && this.setupModal.setup_type === 'qr';
+    },
+
+    async loadAgents() {
+      try {
+        var data = await OpenFangAPI.get('/api/agents');
+        if (!Array.isArray(data)) {
+          this.availableAgents = [];
+          return;
+        }
+        this.availableAgents = data
+          .map(function(agent) { return agent && agent.name ? String(agent.name) : ''; })
+          .filter(function(name) { return name.length > 0; })
+          .sort(function(a, b) { return a.localeCompare(b); });
+      } catch(e) {
+        this.availableAgents = [];
+        console.warn('Agent list refresh failed:', e.message);
+      }
     },
 
     async loadChannels() {
@@ -110,7 +134,9 @@ function channelsPage() {
       this.startPolling();
     },
 
-    async loadData() { return this.loadChannels(); },
+    async loadData() {
+      await Promise.all([this.loadChannels(), this.loadAgents()]);
+    },
 
     startPolling() {
       var self = this;
@@ -150,6 +176,7 @@ function channelsPage() {
 
     openSetup(ch) {
       this.setupModal = ch;
+      this.loadAgents();
       // Pre-populate form values from saved config (non-secret fields).
       var vals = {};
       if (ch.fields) {
@@ -263,14 +290,14 @@ function channelsPage() {
       this.configuring = false;
     },
 
-    async saveWhatsappVoiceConfig() {
+    async saveWhatsappAdvancedConfig() {
       if (!this.setupModal || this.setupModal.name !== 'whatsapp') return;
       this.configuring = true;
       try {
         await OpenFangAPI.post('/api/channels/whatsapp/configure', {
           fields: this.formValues
         });
-        OpenFangToast.success('WhatsApp voice settings saved.');
+        OpenFangToast.success('WhatsApp advanced settings saved.');
         await this.refreshStatus();
       } catch(e) {
         OpenFangToast.error('Failed: ' + (e.message || 'Unknown error'));
