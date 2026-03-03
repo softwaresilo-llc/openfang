@@ -4188,6 +4188,11 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "home_dir": config.home_dir.to_string_lossy(),
         "data_dir": config.data_dir.to_string_lossy(),
         "api_key": if config.api_key.is_empty() { "not set" } else { "***" },
+        "api": {
+            "api_listen": config.api_listen,
+            "api_key": "",
+            "log_level": config.log_level,
+        },
         "default_model": {
             "provider": config.default_model.provider,
             "model": config.default_model.model,
@@ -4195,6 +4200,19 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         },
         "memory": {
             "decay_rate": config.memory.decay_rate,
+        },
+        "media": {
+            "image_description": config.media.image_description,
+            "audio_transcription": config.media.audio_transcription,
+            "video_description": config.media.video_description,
+            "max_concurrency": config.media.max_concurrency,
+            "image_provider": config.media.image_provider.clone().unwrap_or_else(|| "auto".to_string()),
+            "audio_provider": config.media.audio_provider.clone().unwrap_or_else(|| "auto".to_string()),
+            "audio_local_endpoint": config.media.audio_local_endpoint.clone().unwrap_or_default(),
+            "audio_local_model": config.media.audio_local_model,
+            "audio_local_language": config.media.audio_local_language.clone().unwrap_or_default(),
+            "audio_local_bin": config.media.audio_local_bin,
+            "audio_local_timeout_secs": config.media.audio_local_timeout_secs,
         },
     }))
 }
@@ -8577,6 +8595,44 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     "discord": "object",
                     "slack": "object",
                     "whatsapp": "object"
+                }
+            },
+            "media": {
+                "fields": {
+                    "image_description": "boolean",
+                    "audio_transcription": "boolean",
+                    "video_description": "boolean",
+                    "max_concurrency": "number",
+                    "image_provider": {
+                        "type": "select",
+                        "options": ["auto", "anthropic", "openai", "gemini"],
+                        "description": "Image understanding provider. Use 'auto' to detect via available API keys."
+                    },
+                    "audio_provider": {
+                        "type": "select",
+                        "options": ["auto", "groq", "openai", "local"],
+                        "description": "Audio transcription provider. Use 'local' for local endpoint/CLI transcription."
+                    },
+                    "audio_local_endpoint": {
+                        "type": "string",
+                        "description": "Optional local STT HTTP endpoint (e.g., http://127.0.0.1:8000/v1/audio/transcriptions)."
+                    },
+                    "audio_local_model": {
+                        "type": "string",
+                        "description": "Model hint for local STT (default: base)."
+                    },
+                    "audio_local_language": {
+                        "type": "string",
+                        "description": "Preferred language hint for local STT, e.g. de or en."
+                    },
+                    "audio_local_bin": {
+                        "type": "string",
+                        "description": "CLI binary for local STT fallback (default: whisper)."
+                    },
+                    "audio_local_timeout_secs": {
+                        "type": "number",
+                        "description": "Timeout for local STT requests/CLI runs."
+                    }
                 }
             }
         }
