@@ -196,11 +196,8 @@ fn fetch_unseen_emails(
     password: &str,
     folders: &[String],
 ) -> Result<Vec<(String, String, String, String)>, String> {
-    let tls = native_tls::TlsConnector::builder()
-        .build()
-        .map_err(|e| format!("TLS connector error: {e}"))?;
-
-    let client = imap::connect((host, port), host, &tls)
+    let client = imap::ClientBuilder::new(host, port)
+        .connect()
         .map_err(|e| format!("IMAP connect failed: {e}"))?;
 
     let mut session = client
