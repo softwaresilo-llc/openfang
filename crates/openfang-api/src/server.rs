@@ -564,6 +564,17 @@ pub async fn build_router(
             "/api/bindings/{index}",
             axum::routing::delete(routes::remove_binding),
         )
+        // Conversation room state routes
+        .route(
+            "/api/conversations",
+            axum::routing::get(routes::list_conversations),
+        )
+        .route(
+            "/api/conversations/{conversation_key}",
+            axum::routing::get(routes::get_conversation)
+                .put(routes::upsert_conversation)
+                .delete(routes::delete_conversation),
+        )
         // A2A (Agent-to-Agent) Protocol endpoints
         .route(
             "/.well-known/agent.json",

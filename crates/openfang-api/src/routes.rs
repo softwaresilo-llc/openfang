@@ -1813,9 +1813,7 @@ fn build_field_json(
                     val.clone()
                 };
                 field["value"] = display_val;
-                if !val.is_null()
-                    && val.as_str().map(|s| !s.is_empty()).unwrap_or(true)
-                {
+                if !val.is_null() && val.as_str().map(|s| !s.is_empty()).unwrap_or(true) {
                     field["has_value"] = serde_json::Value::Bool(true);
                 }
             }
@@ -1835,46 +1833,166 @@ fn channel_config_values(
     name: &str,
 ) -> Option<serde_json::Value> {
     match name {
-        "telegram" => config.telegram.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "discord" => config.discord.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "slack" => config.slack.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "whatsapp" => config.whatsapp.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "signal" => config.signal.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "matrix" => config.matrix.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "email" => config.email.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "teams" => config.teams.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "mattermost" => config.mattermost.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "irc" => config.irc.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "google_chat" => config.google_chat.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "twitch" => config.twitch.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "rocketchat" => config.rocketchat.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "zulip" => config.zulip.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "xmpp" => config.xmpp.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "line" => config.line.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "viber" => config.viber.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "messenger" => config.messenger.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "reddit" => config.reddit.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "mastodon" => config.mastodon.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "bluesky" => config.bluesky.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "feishu" => config.feishu.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "revolt" => config.revolt.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "nextcloud" => config.nextcloud.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "guilded" => config.guilded.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "keybase" => config.keybase.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "threema" => config.threema.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "nostr" => config.nostr.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "webex" => config.webex.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "pumble" => config.pumble.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "flock" => config.flock.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "twist" => config.twist.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "mumble" => config.mumble.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "dingtalk" => config.dingtalk.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "discourse" => config.discourse.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "gitter" => config.gitter.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "ntfy" => config.ntfy.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "gotify" => config.gotify.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "webhook" => config.webhook.as_ref().and_then(|c| serde_json::to_value(c).ok()),
-        "linkedin" => config.linkedin.as_ref().and_then(|c| serde_json::to_value(c).ok()),
+        "telegram" => config
+            .telegram
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "discord" => config
+            .discord
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "slack" => config
+            .slack
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "whatsapp" => config
+            .whatsapp
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "signal" => config
+            .signal
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "matrix" => config
+            .matrix
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "email" => config
+            .email
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "teams" => config
+            .teams
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "mattermost" => config
+            .mattermost
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "irc" => config
+            .irc
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "google_chat" => config
+            .google_chat
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "twitch" => config
+            .twitch
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "rocketchat" => config
+            .rocketchat
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "zulip" => config
+            .zulip
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "xmpp" => config
+            .xmpp
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "line" => config
+            .line
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "viber" => config
+            .viber
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "messenger" => config
+            .messenger
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "reddit" => config
+            .reddit
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "mastodon" => config
+            .mastodon
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "bluesky" => config
+            .bluesky
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "feishu" => config
+            .feishu
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "revolt" => config
+            .revolt
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "nextcloud" => config
+            .nextcloud
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "guilded" => config
+            .guilded
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "keybase" => config
+            .keybase
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "threema" => config
+            .threema
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "nostr" => config
+            .nostr
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "webex" => config
+            .webex
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "pumble" => config
+            .pumble
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "flock" => config
+            .flock
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "twist" => config
+            .twist
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "mumble" => config
+            .mumble
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "dingtalk" => config
+            .dingtalk
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "discourse" => config
+            .discourse
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "gitter" => config
+            .gitter
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "ntfy" => config
+            .ntfy
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "gotify" => config
+            .gotify
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "webhook" => config
+            .webhook
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "linkedin" => config
+            .linkedin
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
     }
 }
@@ -4350,6 +4468,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "audio_local_language": config.media.audio_local_language.clone().unwrap_or_default(),
             "audio_local_bin": config.media.audio_local_bin,
             "audio_local_timeout_secs": config.media.audio_local_timeout_secs,
+        },
+        "chat_rooms": {
+            "enabled": config.chat_rooms.enabled,
+            "default_mode": config.chat_rooms.default_mode,
+            "default_requires_mention": config.chat_rooms.default_requires_mention,
+            "respond_without_mention": config.chat_rooms.respond_without_mention,
+            "max_active_agents": config.chat_rooms.max_active_agents,
         },
     }))
 }
@@ -8747,6 +8872,18 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     "whatsapp": "object"
                 }
             },
+            "chat_rooms": {
+                "fields": {
+                    "enabled": "boolean",
+                    "default_mode": {
+                        "type": "select",
+                        "options": ["active", "panel", "orchestrator"]
+                    },
+                    "default_requires_mention": "boolean",
+                    "respond_without_mention": "boolean",
+                    "max_active_agents": "number"
+                }
+            },
             "media": {
                 "fields": {
                     "image_description": "boolean",
@@ -9318,6 +9455,140 @@ pub async fn remove_binding(
     }
 }
 
+// ─── Conversation Rooms API ─────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+pub struct UpsertConversationRequest {
+    pub mode: Option<openfang_types::config::ChatRoomMode>,
+    pub active_agent: Option<String>,
+    pub panel_agents: Option<Vec<String>>,
+    pub requires_mention: Option<bool>,
+    pub respond_without_mention: Option<bool>,
+}
+
+/// GET /api/conversations — List all conversation room states.
+pub async fn list_conversations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let mut conversations: Vec<openfang_channels::bridge::ConversationState> =
+        crate::channel_bridge::load_room_states(state.kernel.as_ref())
+            .into_values()
+            .collect();
+    conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let total = conversations.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "conversations": conversations,
+            "total": total,
+        })),
+    )
+}
+
+/// GET /api/conversations/{conversation_key} — Get one conversation room state.
+pub async fn get_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_key): Path<String>,
+) -> impl IntoResponse {
+    let states = crate::channel_bridge::load_room_states(state.kernel.as_ref());
+    match states.get(&conversation_key) {
+        Some(state) => (StatusCode::OK, Json(serde_json::json!(state))),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Conversation not found"})),
+        ),
+    }
+}
+
+/// PUT /api/conversations/{conversation_key} — Create/update a conversation room state.
+pub async fn upsert_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_key): Path<String>,
+    Json(req): Json<UpsertConversationRequest>,
+) -> impl IntoResponse {
+    let mut states = crate::channel_bridge::load_room_states(state.kernel.as_ref());
+    let existed = states.contains_key(&conversation_key);
+
+    let (channel, room_id) = match conversation_key.split_once(':') {
+        Some((ch, rest)) => (ch.to_string(), rest.to_string()),
+        None => ("unknown".to_string(), conversation_key.clone()),
+    };
+
+    let mut convo_state = states.get(&conversation_key).cloned().unwrap_or_else(|| {
+        openfang_channels::bridge::ConversationState::with_defaults(
+            conversation_key.clone(),
+            channel,
+            room_id,
+            &state.kernel.config.chat_rooms,
+        )
+    });
+
+    if let Some(mode) = req.mode {
+        convo_state.mode = mode;
+    }
+    if let Some(active_agent) = req.active_agent {
+        let trimmed = active_agent.trim();
+        convo_state.active_agent = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+    }
+    if let Some(panel_agents) = req.panel_agents {
+        let mut cleaned: Vec<String> = panel_agents
+            .into_iter()
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .collect();
+        let max = state.kernel.config.chat_rooms.max_active_agents.max(1);
+        if cleaned.len() > max {
+            cleaned.truncate(max);
+        }
+        convo_state.panel_agents = cleaned;
+    }
+    if let Some(requires_mention) = req.requires_mention {
+        convo_state.requires_mention = requires_mention;
+    }
+    if let Some(respond_without_mention) = req.respond_without_mention {
+        convo_state.respond_without_mention = respond_without_mention;
+    }
+    convo_state.updated_at = chrono::Utc::now().to_rfc3339();
+
+    states.insert(conversation_key.clone(), convo_state.clone());
+    if let Err(e) = crate::channel_bridge::save_room_states(state.kernel.as_ref(), &states) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to save conversation state: {e}")})),
+        );
+    }
+
+    let status = if existed {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    (status, Json(serde_json::json!(convo_state)))
+}
+
+/// DELETE /api/conversations/{conversation_key} — Remove a conversation room state.
+pub async fn delete_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(conversation_key): Path<String>,
+) -> impl IntoResponse {
+    match crate::channel_bridge::remove_room_state(state.kernel.as_ref(), &conversation_key) {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted"})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Conversation not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to delete conversation: {e}")})),
+        ),
+    }
+}
+
 // ─── Device Pairing endpoints ───────────────────────────────────────────
 
 /// POST /api/pairing/request — Create a new pairing request (returns token + QR URI).
@@ -9480,6 +9751,9 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
         serde_json::json!({"cmd": "/stop", "desc": "Cancel current agent run"}),
         serde_json::json!({"cmd": "/usage", "desc": "Show session token usage & cost"}),
         serde_json::json!({"cmd": "/think", "desc": "Toggle extended thinking (/think [on|off|stream])"}),
+        serde_json::json!({"cmd": "/room", "desc": "Show group room routing state (/room status)"}),
+        serde_json::json!({"cmd": "/room mode", "desc": "Set room mode (/room mode <active|panel|orchestrator>)"}),
+        serde_json::json!({"cmd": "/room active", "desc": "Set active room agent (/room active <name>)"}),
         serde_json::json!({"cmd": "/context", "desc": "Show context window usage & pressure"}),
         serde_json::json!({"cmd": "/verbose", "desc": "Cycle tool detail level (/verbose [off|on|full])"}),
         serde_json::json!({"cmd": "/queue", "desc": "Check if agent is processing"}),
