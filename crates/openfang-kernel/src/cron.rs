@@ -311,11 +311,8 @@ pub fn compute_next_run(schedule: &CronSchedule) -> chrono::DateTime<Utc> {
 
 /// Compute the next fire time for a schedule, strictly after `after`.
 ///
-/// Uses `after + 1 second` as the base time so the `cron` crate's
-/// inclusive `.after()` always returns a strictly future time. Without
-/// this offset, calling `compute_next_run` right after a job fires can
-/// return the same minute (or even the same second), causing the
-/// scheduler to re-fire immediately.
+/// Handles both inclusive and exclusive iterator semantics from the underlying
+/// cron parser by skipping any candidate `<= after` when necessary.
 pub fn compute_next_run_after(
     schedule: &CronSchedule,
     after: chrono::DateTime<Utc>,
@@ -336,14 +333,17 @@ pub fn compute_next_run_after(
                 _ => expr.clone(),
             };
 
-            // Add 1 second so `.after()` (inclusive) skips the current second.
-            let base = after + Duration::seconds(1);
-
             match seven_field.parse::<cron::Schedule>() {
-                Ok(sched) => sched
-                    .after(&base)
-                    .next()
-                    .unwrap_or_else(|| after + Duration::hours(1)),
+                Ok(sched) => {
+                    let mut it = sched.after(&after);
+                    match it.next() {
+                        Some(candidate) if candidate <= after => {
+                            it.next().unwrap_or_else(|| after + Duration::hours(1))
+                        }
+                        Some(candidate) => candidate,
+                        None => after + Duration::hours(1),
+                    }
+                }
                 Err(e) => {
                     warn!("Failed to parse cron expression '{}': {}", expr, e);
                     after + Duration::hours(1)
@@ -360,7 +360,7 @@ pub fn compute_next_run_after(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration;
+    use chrono::{Duration, TimeZone};
     use openfang_types::scheduler::{CronAction, CronDelivery};
 
     /// Build a minimal valid `CronJob` with an `Every` schedule.
@@ -748,22 +748,29 @@ mod tests {
 
     #[test]
     fn test_compute_next_run_after_skips_current_second() {
-        // A "every 4 hours" cron: next_run should be >= 4 hours from now,
-        // not in the same minute (the bug from #55).
+        // A "every 4 hours" cron should never return the same tick when
+        // `after` is exactly on a matching boundary.
         let schedule = CronSchedule::Cron {
             expr: "0 */4 * * *".into(),
             tz: None,
         };
-        let now = Utc::now();
-        let next = compute_next_run_after(&schedule, now);
-        // Must be strictly after `now` and at least ~1 hour away
-        // (the closest 4-hourly boundary is at least minutes away).
-        assert!(next > now, "next_run should be strictly after now");
-        let diff = next - now;
-        assert!(
-            diff.num_minutes() >= 1,
-            "Expected next_run at least 1 min away, got {} seconds",
-            diff.num_seconds()
+
+        // Exactly on a matching time (04:00), the next run must jump to 08:00.
+        let on_boundary = Utc.with_ymd_and_hms(2026, 1, 1, 4, 0, 0).unwrap();
+        let next = compute_next_run_after(&schedule, on_boundary);
+        assert_eq!(
+            next,
+            Utc.with_ymd_and_hms(2026, 1, 1, 8, 0, 0).unwrap(),
+            "next_run should skip current matching instant"
+        );
+
+        // One second before the boundary should resolve to that boundary.
+        let before_boundary = Utc.with_ymd_and_hms(2026, 1, 1, 3, 59, 59).unwrap();
+        let next2 = compute_next_run_after(&schedule, before_boundary);
+        assert_eq!(
+            next2,
+            Utc.with_ymd_and_hms(2026, 1, 1, 4, 0, 0).unwrap(),
+            "next_run should pick the immediate next matching instant"
         );
     }
 
