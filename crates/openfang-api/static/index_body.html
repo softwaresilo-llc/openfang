@@ -1960,15 +1960,18 @@
                               <div style="margin-bottom:0.75rem">
                                 <label class="text-sm text-dim" style="display:block;margin-bottom:0.25rem" x-text="f.label"></label>
                                 <template x-if="isDefaultAgentField(f)">
-                                  <select class="form-input" x-model="formValues[f.key]">
-                                    <option value="">(not set)</option>
-                                    <template x-if="formValues[f.key] && !hasAvailableAgent(formValues[f.key])">
-                                      <option :value="formValues[f.key]" x-text="formValues[f.key] + ' (saved)'"></option>
-                                    </template>
-                                    <template x-for="agentName in availableAgents" :key="agentName">
-                                      <option :value="agentName" x-text="agentName"></option>
-                                    </template>
-                                  </select>
+                                  <div>
+                                    <input class="form-input" type="text"
+                                           x-model="formValues[f.key]"
+                                           x-init="if ((!formValues[f.key] || formValues[f.key] === '') && f.value !== undefined && f.value !== null) formValues[f.key] = String(f.value)"
+                                           list="channel-default-agent-options"
+                                           :placeholder="f.placeholder">
+                                    <datalist id="channel-default-agent-options">
+                                      <template x-for="agentName in availableAgents" :key="agentName">
+                                        <option :value="agentName"></option>
+                                      </template>
+                                    </datalist>
+                                  </div>
                                 </template>
                                 <template x-if="isDefaultAgentField(f) && !availableAgents.length">
                                   <div class="text-xs text-dim" style="margin-top:4px">No agents found. Create an agent first.</div>
@@ -2041,15 +2044,18 @@
                                  :required="f.required">
                         </template>
                         <template x-if="isDefaultAgentField(f)">
-                          <select class="form-input" x-model="formValues[f.key]">
-                            <option value="">(not set)</option>
-                            <template x-if="formValues[f.key] && !hasAvailableAgent(formValues[f.key])">
-                              <option :value="formValues[f.key]" x-text="formValues[f.key] + ' (saved)'"></option>
-                            </template>
-                            <template x-for="agentName in availableAgents" :key="agentName">
-                              <option :value="agentName" x-text="agentName"></option>
-                            </template>
-                          </select>
+                          <div>
+                            <input class="form-input" type="text"
+                                   x-model="formValues[f.key]"
+                                   x-init="if ((!formValues[f.key] || formValues[f.key] === '') && f.value !== undefined && f.value !== null) formValues[f.key] = String(f.value)"
+                                   list="channel-default-agent-options"
+                                   :placeholder="f.placeholder">
+                            <datalist id="channel-default-agent-options">
+                              <template x-for="agentName in availableAgents" :key="agentName">
+                                <option :value="agentName"></option>
+                              </template>
+                            </datalist>
+                          </div>
                         </template>
                         <template x-if="isDefaultAgentField(f) && !availableAgents.length">
                           <div class="text-xs text-dim" style="margin-top:4px">No agents found. Create an agent first.</div>
@@ -2092,15 +2098,18 @@
                                          :placeholder="f.has_value ? '••••••• (set)' : f.placeholder">
                                 </template>
                                 <template x-if="isDefaultAgentField(f)">
-                                  <select class="form-input" x-model="formValues[f.key]">
-                                    <option value="">(not set)</option>
-                                    <template x-if="formValues[f.key] && !hasAvailableAgent(formValues[f.key])">
-                                      <option :value="formValues[f.key]" x-text="formValues[f.key] + ' (saved)'"></option>
-                                    </template>
-                                    <template x-for="agentName in availableAgents" :key="agentName">
-                                      <option :value="agentName" x-text="agentName"></option>
-                                    </template>
-                                  </select>
+                                  <div>
+                                    <input class="form-input" type="text"
+                                           x-model="formValues[f.key]"
+                                           x-init="if ((!formValues[f.key] || formValues[f.key] === '') && f.value !== undefined && f.value !== null) formValues[f.key] = String(f.value)"
+                                           list="channel-default-agent-options"
+                                           :placeholder="f.placeholder">
+                                    <datalist id="channel-default-agent-options">
+                                      <template x-for="agentName in availableAgents" :key="agentName">
+                                        <option :value="agentName"></option>
+                                      </template>
+                                    </datalist>
+                                  </div>
                                 </template>
                                 <template x-if="isDefaultAgentField(f) && !availableAgents.length">
                                   <div class="text-xs text-dim" style="margin-top:4px">No agents found. Create an agent first.</div>

@@ -181,13 +181,20 @@ function channelsPage() {
       return 'difficulty-medium';
     },
 
-    openSetup(ch) {
-      this.setupModal = ch;
-      this.loadAgents();
+    async openSetup(ch) {
+      // Refresh channel + agent data before opening to avoid stale form values.
+      await Promise.all([this.loadAgents(), this.loadChannels()]);
+      var live = null;
+      if (ch && ch.name) {
+        live = this.allChannels.find(function(item) {
+          return item && item.name === ch.name;
+        }) || null;
+      }
+      this.setupModal = live || ch;
       // Pre-populate form values from saved config (non-secret fields).
       var vals = {};
-      if (ch.fields) {
-        ch.fields.forEach(function(f) {
+      if (this.setupModal && this.setupModal.fields) {
+        this.setupModal.fields.forEach(function(f) {
           if (f.value !== undefined && f.value !== null && f.type !== 'secret') {
             vals[f.key] = String(f.value);
           }
@@ -196,11 +203,11 @@ function channelsPage() {
       this.formValues = vals;
       this.showAdvanced = false;
       this.showBusinessApi = false;
-      this.setupStep = ch.configured ? 3 : 1;
-      this.testPassed = !!ch.configured;
+      this.setupStep = this.setupModal && this.setupModal.configured ? 3 : 1;
+      this.testPassed = !!(this.setupModal && this.setupModal.configured);
       this.resetQR();
       // Auto-start QR flow for QR-type channels
-      if (ch.setup_type === 'qr') {
+      if (this.setupModal && this.setupModal.setup_type === 'qr') {
         this.startQR();
       }
     },
@@ -304,6 +311,13 @@ function channelsPage() {
         await OpenFangAPI.post('/api/channels/whatsapp/configure', {
           fields: this.formValues
         });
+        await this.loadChannels();
+        if (this.setupModal && this.setupModal.name) {
+          var latest = this.allChannels.find(function(ch) {
+            return ch && ch.name === 'whatsapp';
+          });
+          if (latest) this.setupModal = latest;
+        }
         OpenFangToast.success('WhatsApp advanced settings saved.');
         await this.refreshStatus();
       } catch(e) {
