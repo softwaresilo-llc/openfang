@@ -130,6 +130,47 @@ impl Default for ChannelVoiceConfig {
     }
 }
 
+/// Group chat routing mode for channel conversations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRoomMode {
+    /// Route to one currently active agent.
+    #[default]
+    Active,
+    /// Route to a panel of multiple agents.
+    Panel,
+    /// Route to an orchestrator agent (which can delegate to others).
+    Orchestrator,
+}
+
+/// Global defaults for channel group-chat room behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatRoomsConfig {
+    /// Enable group-chat room routing features.
+    pub enabled: bool,
+    /// Default routing mode when a room is seen for the first time.
+    pub default_mode: ChatRoomMode,
+    /// Require @mentions to trigger replies in new rooms.
+    pub default_requires_mention: bool,
+    /// In panel mode, allow all panel agents to answer when no mention is present.
+    pub respond_without_mention: bool,
+    /// Maximum number of agents allowed to respond per room turn.
+    pub max_active_agents: usize,
+}
+
+impl Default for ChatRoomsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_mode: ChatRoomMode::Active,
+            default_requires_mention: true,
+            respond_without_mention: true,
+            max_active_agents: 3,
+        }
+    }
+}
+
 /// Controls what usage info appears in response footers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1067,6 +1108,9 @@ pub struct KernelConfig {
     /// Shell/exec security policy.
     #[serde(default)]
     pub exec_policy: ExecPolicy,
+    /// Group-chat room routing defaults.
+    #[serde(default)]
+    pub chat_rooms: ChatRoomsConfig,
     /// Agent bindings for multi-account routing.
     #[serde(default)]
     pub bindings: Vec<AgentBinding>,
@@ -1259,6 +1303,7 @@ impl Default for KernelConfig {
             max_cron_jobs: default_max_cron_jobs(),
             include: Vec::new(),
             exec_policy: ExecPolicy::default(),
+            chat_rooms: ChatRoomsConfig::default(),
             bindings: Vec::new(),
             broadcast: BroadcastConfig::default(),
             auto_reply: AutoReplyConfig::default(),
@@ -1345,6 +1390,7 @@ impl std::fmt::Debug for KernelConfig {
             .field("max_cron_jobs", &self.max_cron_jobs)
             .field("include", &format!("{} file(s)", self.include.len()))
             .field("exec_policy", &self.exec_policy.mode)
+            .field("chat_rooms", &self.chat_rooms)
             .field("bindings", &format!("{} binding(s)", self.bindings.len()))
             .field(
                 "broadcast",
@@ -3262,6 +3308,13 @@ impl KernelConfig {
         } else if self.web.fetch.timeout_secs > 120 {
             self.web.fetch.timeout_secs = 120;
         }
+
+        // Chat room max active agents: min 1, max 16
+        if self.chat_rooms.max_active_agents == 0 {
+            self.chat_rooms.max_active_agents = 3;
+        } else if self.chat_rooms.max_active_agents > 16 {
+            self.chat_rooms.max_active_agents = 16;
+        }
     }
 }
 
@@ -3424,6 +3477,33 @@ mod tests {
         assert_eq!(back.default_language, VoiceLanguage::En);
         assert_eq!(back.auto_min_text_length, 80);
         assert_eq!(back.auto_keywords, vec!["status", "report"]);
+    }
+
+    #[test]
+    fn test_chat_rooms_config_defaults() {
+        let cfg = ChatRoomsConfig::default();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.default_mode, ChatRoomMode::Active);
+        assert!(cfg.default_requires_mention);
+        assert!(cfg.respond_without_mention);
+        assert_eq!(cfg.max_active_agents, 3);
+    }
+
+    #[test]
+    fn test_chat_rooms_config_serde_roundtrip() {
+        let cfg = ChatRoomsConfig {
+            enabled: true,
+            default_mode: ChatRoomMode::Panel,
+            default_requires_mention: false,
+            respond_without_mention: true,
+            max_active_agents: 5,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: ChatRoomsConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.default_mode, ChatRoomMode::Panel);
+        assert!(!back.default_requires_mention);
+        assert!(back.respond_without_mention);
+        assert_eq!(back.max_active_agents, 5);
     }
 
     #[test]
@@ -3646,16 +3726,30 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_bounds_chat_room_max_active_agents() {
+        let mut config = KernelConfig::default();
+        config.chat_rooms.max_active_agents = 0;
+        config.clamp_bounds();
+        assert_eq!(config.chat_rooms.max_active_agents, 3);
+
+        config.chat_rooms.max_active_agents = 64;
+        config.clamp_bounds();
+        assert_eq!(config.chat_rooms.max_active_agents, 16);
+    }
+
+    #[test]
     fn test_clamp_bounds_defaults_unchanged() {
         let mut config = KernelConfig::default();
         let browser_timeout = config.browser.timeout_secs;
         let browser_sessions = config.browser.max_sessions;
         let fetch_bytes = config.web.fetch.max_response_bytes;
         let fetch_timeout = config.web.fetch.timeout_secs;
+        let max_active_agents = config.chat_rooms.max_active_agents;
         config.clamp_bounds();
         assert_eq!(config.browser.timeout_secs, browser_timeout);
         assert_eq!(config.browser.max_sessions, browser_sessions);
         assert_eq!(config.web.fetch.max_response_bytes, fetch_bytes);
         assert_eq!(config.web.fetch.timeout_secs, fetch_timeout);
+        assert_eq!(config.chat_rooms.max_active_agents, max_active_agents);
     }
 }
