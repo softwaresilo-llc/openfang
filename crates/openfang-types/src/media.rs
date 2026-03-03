@@ -75,6 +75,17 @@ pub struct MediaConfig {
     pub image_provider: Option<String>,
     /// Preferred audio transcription provider (auto-detect if None).
     pub audio_provider: Option<String>,
+    /// Local STT HTTP endpoint (optional). If set and audio_provider=local, OpenFang POSTs multipart audio here.
+    /// Supports OpenAI-style `/v1/audio/transcriptions` and simple JSON `{ "text": "..." }` responses.
+    pub audio_local_endpoint: Option<String>,
+    /// Local STT model hint (used for local endpoint payloads / local whisper CLI). Default: "base".
+    pub audio_local_model: String,
+    /// Preferred local STT language hint (e.g., "de", "en"). If empty/None, provider auto-detects language.
+    pub audio_local_language: Option<String>,
+    /// Local STT binary for CLI fallback. Default: "whisper".
+    pub audio_local_bin: String,
+    /// Timeout for local STT requests / CLI in seconds. Default: 120.
+    pub audio_local_timeout_secs: u64,
 }
 
 impl Default for MediaConfig {
@@ -86,6 +97,11 @@ impl Default for MediaConfig {
             max_concurrency: 2,
             image_provider: None,
             audio_provider: None,
+            audio_local_endpoint: None,
+            audio_local_model: "base".to_string(),
+            audio_local_language: None,
+            audio_local_bin: "whisper".to_string(),
+            audio_local_timeout_secs: 120,
         }
     }
 }
@@ -359,6 +375,12 @@ mod tests {
         assert!(!config.video_description);
         assert_eq!(config.max_concurrency, 2);
         assert!(config.image_provider.is_none());
+        assert!(config.audio_provider.is_none());
+        assert!(config.audio_local_endpoint.is_none());
+        assert_eq!(config.audio_local_model, "base");
+        assert!(config.audio_local_language.is_none());
+        assert_eq!(config.audio_local_bin, "whisper");
+        assert_eq!(config.audio_local_timeout_secs, 120);
     }
 
     #[test]

@@ -1128,7 +1128,8 @@ function chatPage() {
       if (blob.size < 100) return; // too small
 
       // Show a temporary "Transcribing..." message
-      this.messages.push({ id: ++msgId, role: 'system', text: 'Transcribing audio...', thinking: true, ts: Date.now(), tools: [] });
+      var transcribingMsgId = ++msgId;
+      this.messages.push({ id: transcribingMsgId, role: 'system', text: 'Transcribing audio...', thinking: true, ts: Date.now(), tools: [] });
       this.scrollToBottom();
 
       try {
@@ -1138,15 +1139,41 @@ function chatPage() {
         var upload = await OpenFangAPI.upload(this.currentAgent.id, file);
 
         // Remove the "Transcribing..." message
-        this.messages = this.messages.filter(function(m) { return !m.thinking || m.role !== 'system'; });
+        this.messages = this.messages.filter(function(m) { return m.id !== transcribingMsgId; });
 
-        // Use server-side transcription if available, otherwise fall back to placeholder
+        // Require real STT output; sending placeholder filenames to the agent
+        // causes unhelpful "I can't find this file" behavior.
         var text = (upload.transcription && upload.transcription.trim())
           ? upload.transcription.trim()
-          : '[Voice message - audio: ' + upload.filename + ']';
+          : '';
+        if (!text) {
+          this.messages.push({
+            id: ++msgId,
+            role: 'system',
+            text: 'Voice message received, but transcription is unavailable. Configure STT or type your message.',
+            meta: '',
+            tools: [],
+            ts: Date.now()
+          });
+          this.scrollToBottom();
+          if (typeof OpenFangToast !== 'undefined') {
+            OpenFangToast.warn('No speech-to-text result for this recording');
+          }
+          return;
+        }
+
+        // Mirror normal send flow: show user message + respect queue while generating
+        this.messages.push({ id: ++msgId, role: 'user', text: text, meta: '', tools: [], ts: Date.now() });
+        this.scrollToBottom();
+        localStorage.setItem('of-first-msg', 'true');
+
+        if (this.sending) {
+          this.messageQueue.push({ text: text, files: [upload], images: [] });
+          return;
+        }
         this._sendPayload(text, [upload], []);
       } catch(e) {
-        this.messages = this.messages.filter(function(m) { return !m.thinking || m.role !== 'system'; });
+        this.messages = this.messages.filter(function(m) { return m.id !== transcribingMsgId; });
         if (typeof OpenFangToast !== 'undefined') OpenFangToast.error('Failed to upload audio: ' + (e.message || 'unknown error'));
       }
     },

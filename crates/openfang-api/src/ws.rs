@@ -861,7 +861,20 @@ async fn handle_command(
             })
         }
         "queue" => {
-            let is_running = state.kernel.running_tasks.contains_key(&agent_id);
+            // Self-heal stale queue entries: a finished task can remain in the map
+            // until an explicit cleanup path runs. Treat finished handles as idle.
+            let is_running = if let Some(handle_ref) = state.kernel.running_tasks.get(&agent_id) {
+                let finished = handle_ref.is_finished();
+                drop(handle_ref);
+                if finished {
+                    let _ = state.kernel.running_tasks.remove(&agent_id);
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
             let msg = if is_running {
                 "Agent is processing a request..."
             } else {

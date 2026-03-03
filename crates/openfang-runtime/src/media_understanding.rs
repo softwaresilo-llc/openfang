@@ -5,7 +5,10 @@
 use openfang_types::media::{
     MediaAttachment, MediaConfig, MediaSource, MediaType, MediaUnderstanding,
 };
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tracing::info;
 
@@ -36,7 +39,7 @@ impl MediaEngine {
         }
 
         // Determine which provider to use
-        let provider = self.config.image_provider.as_deref()
+        let provider = configured_provider(self.config.image_provider.as_deref())
             .or_else(|| detect_vision_provider())
             .ok_or("No vision-capable LLM provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")?;
 
@@ -54,7 +57,7 @@ impl MediaEngine {
     }
 
     /// Transcribe audio using speech-to-text.
-    /// Auto-cascade: Groq (whisper-large-v3-turbo) -> OpenAI (whisper-1).
+    /// Auto-cascade: Groq (whisper-large-v3-turbo) -> OpenAI (whisper-1) -> local.
     pub async fn transcribe_audio(
         &self,
         attachment: &MediaAttachment,
@@ -63,14 +66,15 @@ impl MediaEngine {
         if attachment.media_type != MediaType::Audio {
             return Err("Expected audio attachment".into());
         }
+        if !self.config.audio_transcription {
+            return Err("Audio transcription is disabled in configuration".into());
+        }
 
-        let provider = self
-            .config
-            .audio_provider
-            .as_deref()
+        let provider = self.config.audio_provider.as_deref();
+        let provider = configured_provider(provider)
             .or_else(|| detect_audio_provider())
             .ok_or(
-                "No audio transcription provider configured. Set GROQ_API_KEY or OPENAI_API_KEY",
+                "No audio transcription provider configured. Set GROQ_API_KEY, OPENAI_API_KEY, or media.audio_provider='local'",
             )?;
 
         let _permit = self.semaphore.acquire().await.map_err(|e| e.to_string())?;
@@ -106,54 +110,22 @@ impl MediaEngine {
             }
         };
         let filename = format!("audio.{}", ext);
-
-        let model = default_audio_model(provider);
-
-        // Build API request
-        let (api_url, api_key) = match provider {
-            "groq" => (
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
-            ),
-            "openai" => (
-                "https://api.openai.com/v1/audio/transcriptions",
-                std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
-            ),
+        let (transcription, model) = match provider {
+            "local" => {
+                self.transcribe_audio_local(&audio_bytes, &filename, &attachment.mime_type)
+                    .await?
+            }
+            "groq" | "openai" => {
+                self.transcribe_audio_cloud(
+                    provider,
+                    &audio_bytes,
+                    &filename,
+                    &attachment.mime_type,
+                )
+                .await?
+            }
             other => return Err(format!("Unsupported audio provider: {}", other)),
         };
-
-        info!(provider, model, filename = %filename, size = audio_bytes.len(), "Sending audio for transcription");
-
-        let file_part = reqwest::multipart::Part::bytes(audio_bytes)
-            .file_name(filename)
-            .mime_str(&attachment.mime_type)
-            .map_err(|e| format!("Failed to set MIME type: {}", e))?;
-
-        let form = reqwest::multipart::Form::new()
-            .part("file", file_part)
-            .text("model", model.to_string())
-            .text("response_format", "text");
-
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(api_url)
-            .bearer_auth(&api_key)
-            .multipart(form)
-            .timeout(std::time::Duration::from_secs(60))
-            .send()
-            .await
-            .map_err(|e| format!("Transcription request failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Transcription API error ({}): {}", status, body));
-        }
-
-        let transcription = resp
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read transcription response: {}", e))?;
 
         let transcription = transcription.trim().to_string();
         if transcription.is_empty() {
@@ -162,7 +134,7 @@ impl MediaEngine {
 
         info!(
             provider,
-            model,
+            model = %model,
             chars = transcription.len(),
             "Audio transcription complete"
         );
@@ -171,7 +143,7 @@ impl MediaEngine {
             media_type: MediaType::Audio,
             description: transcription,
             provider: provider.to_string(),
-            model: model.to_string(),
+            model,
         })
     }
 
@@ -235,6 +207,255 @@ impl MediaEngine {
         }
         results
     }
+
+    async fn transcribe_audio_cloud(
+        &self,
+        provider: &str,
+        audio_bytes: &[u8],
+        filename: &str,
+        mime_type: &str,
+    ) -> Result<(String, String), String> {
+        let model = default_audio_model(provider).to_string();
+
+        let (api_url, api_key) = match provider {
+            "groq" => (
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                std::env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY not set")?,
+            ),
+            "openai" => (
+                "https://api.openai.com/v1/audio/transcriptions",
+                std::env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY not set")?,
+            ),
+            other => return Err(format!("Unsupported cloud audio provider: {other}")),
+        };
+
+        info!(
+            provider,
+            model = %model,
+            filename = %filename,
+            size = audio_bytes.len(),
+            "Sending audio for transcription"
+        );
+
+        let file_part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(mime_type)
+            .map_err(|e| format!("Failed to set MIME type: {e}"))?;
+
+        let form = reqwest::multipart::Form::new()
+            .part("file", file_part)
+            .text("model", model.clone())
+            .text("response_format", "text");
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(api_url)
+            .bearer_auth(&api_key)
+            .multipart(form)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| format!("Transcription request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Transcription API error ({status}): {body}"));
+        }
+
+        let transcription = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read transcription response: {e}"))?;
+        Ok((transcription, model))
+    }
+
+    async fn transcribe_audio_local(
+        &self,
+        audio_bytes: &[u8],
+        filename: &str,
+        mime_type: &str,
+    ) -> Result<(String, String), String> {
+        let endpoint = configured_provider(self.config.audio_local_endpoint.as_deref())
+            .map(ToString::to_string)
+            .or_else(|| non_empty_env("OPENFANG_STT_LOCAL_ENDPOINT"));
+        let model = configured_provider(Some(self.config.audio_local_model.as_str()))
+            .map(ToString::to_string)
+            .or_else(|| non_empty_env("OPENFANG_STT_LOCAL_MODEL"))
+            .unwrap_or_else(|| "base".to_string());
+        let language = configured_provider(self.config.audio_local_language.as_deref())
+            .map(ToString::to_string)
+            .or_else(|| non_empty_env("OPENFANG_STT_LOCAL_LANG"));
+        let timeout_secs = parse_env_u64("OPENFANG_STT_LOCAL_TIMEOUT_SECS")
+            .unwrap_or(self.config.audio_local_timeout_secs)
+            .clamp(5, 600);
+
+        if let Some(endpoint_url) = endpoint {
+            let text = self
+                .transcribe_audio_local_http(
+                    &endpoint_url,
+                    &model,
+                    language.as_deref(),
+                    timeout_secs,
+                    audio_bytes,
+                    filename,
+                    mime_type,
+                )
+                .await?;
+            return Ok((text, model));
+        }
+
+        let bin = configured_provider(Some(self.config.audio_local_bin.as_str()))
+            .map(ToString::to_string)
+            .or_else(|| non_empty_env("OPENFANG_STT_LOCAL_BIN"))
+            .unwrap_or_else(|| "whisper".to_string());
+        let text = self
+            .transcribe_audio_local_cli(
+                &bin,
+                &model,
+                language.as_deref(),
+                timeout_secs,
+                audio_bytes,
+                filename,
+            )
+            .await?;
+        Ok((text, model))
+    }
+
+    async fn transcribe_audio_local_http(
+        &self,
+        endpoint: &str,
+        model: &str,
+        language: Option<&str>,
+        timeout_secs: u64,
+        audio_bytes: &[u8],
+        filename: &str,
+        mime_type: &str,
+    ) -> Result<String, String> {
+        let endpoint_lower = endpoint.to_ascii_lowercase();
+        let is_openai_style = endpoint_lower.contains("/v1/audio/transcriptions");
+        let field_name = if is_openai_style { "file" } else { "audio" };
+
+        let file_part = reqwest::multipart::Part::bytes(audio_bytes.to_vec())
+            .file_name(filename.to_string())
+            .mime_str(mime_type)
+            .map_err(|e| format!("Failed to set MIME type: {e}"))?;
+
+        let mut form = reqwest::multipart::Form::new()
+            .part(field_name, file_part)
+            .text("model", model.to_string());
+
+        if is_openai_style {
+            form = form.text("response_format", "text");
+            if let Some(lang) = language {
+                form = form.text("language", lang.to_string());
+            }
+        } else if let Some(lang) = language {
+            form = form.text("preferred_lang", lang.to_string());
+        }
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(endpoint)
+            .multipart(form)
+            .timeout(Duration::from_secs(timeout_secs))
+            .send()
+            .await
+            .map_err(|e| format!("Local STT request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Local STT API error ({status}): {body}"));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let body = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read local STT response: {e}"))?;
+
+        extract_transcription_text(&body, &content_type)
+            .ok_or_else(|| "Local STT response did not include transcription text".to_string())
+    }
+
+    async fn transcribe_audio_local_cli(
+        &self,
+        bin: &str,
+        model: &str,
+        language: Option<&str>,
+        timeout_secs: u64,
+        audio_bytes: &[u8],
+        filename: &str,
+    ) -> Result<String, String> {
+        let temp_dir = std::env::temp_dir().join(format!("openfang-stt-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&temp_dir)
+            .await
+            .map_err(|e| format!("Failed to create temp directory for local STT: {e}"))?;
+
+        let result = async {
+            let input_path = temp_dir.join(filename);
+            tokio::fs::write(&input_path, audio_bytes)
+                .await
+                .map_err(|e| format!("Failed to write temp audio file for local STT: {e}"))?;
+
+            let mut cmd = Command::new(bin);
+            cmd.arg(&input_path)
+                .arg("--model")
+                .arg(model)
+                .arg("--output_format")
+                .arg("txt")
+                .arg("--output_dir")
+                .arg(&temp_dir)
+                .arg("--fp16")
+                .arg("False");
+            if let Some(lang) = language {
+                cmd.arg("--language").arg(lang);
+            }
+
+            let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
+                .await
+                .map_err(|_| {
+                    format!(
+                        "Local STT CLI timed out after {timeout_secs}s (binary: '{bin}')"
+                    )
+                })?
+                .map_err(|e| {
+                    format!("Failed to start local STT binary '{bin}'. Install OpenAI whisper CLI or set media.audio_local_endpoint. Error: {e}")
+                })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!(
+                    "Local STT CLI failed (code {:?}): {}",
+                    output.status.code(),
+                    stderr.trim()
+                ));
+            }
+
+            let stem = Path::new(filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("audio");
+            let txt_path = temp_dir.join(format!("{stem}.txt"));
+            let text = tokio::fs::read_to_string(&txt_path).await.map_err(|e| {
+                format!(
+                    "Local STT CLI finished but no transcript file found at {}: {e}",
+                    txt_path.display()
+                )
+            })?;
+            Ok(text)
+        }
+        .await;
+
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        result
+    }
 }
 
 /// Detect which vision provider is available based on environment variables.
@@ -251,6 +472,73 @@ fn detect_vision_provider() -> Option<&'static str> {
     None
 }
 
+fn configured_provider(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("auto"))
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn parse_env_u64(key: &str) -> Option<u64> {
+    non_empty_env(key).and_then(|v| v.parse::<u64>().ok())
+}
+
+fn extract_transcription_text(body: &[u8], content_type: &str) -> Option<String> {
+    let looks_json = content_type.contains("application/json");
+    if looks_json {
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) {
+            if let Some(text) = extract_transcription_text_from_json(&json) {
+                return Some(text);
+            }
+        }
+    }
+
+    if let Ok(text) = std::str::from_utf8(body) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if !looks_json {
+            return Some(trimmed.to_string());
+        }
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(parsed) = extract_transcription_text_from_json(&json) {
+                return Some(parsed);
+            }
+        }
+        return Some(trimmed.to_string());
+    }
+    None
+}
+
+fn extract_transcription_text_from_json(json: &serde_json::Value) -> Option<String> {
+    const POINTERS: [&str; 6] = [
+        "/text",
+        "/transcription",
+        "/result",
+        "/message",
+        "/data/text",
+        "/data/transcription",
+    ];
+    for pointer in POINTERS {
+        if let Some(text) = json
+            .pointer(pointer)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            return Some(text.to_string());
+        }
+    }
+    None
+}
+
 /// Detect which audio transcription provider is available.
 fn detect_audio_provider() -> Option<&'static str> {
     if std::env::var("GROQ_API_KEY").is_ok() {
@@ -258,6 +546,11 @@ fn detect_audio_provider() -> Option<&'static str> {
     }
     if std::env::var("OPENAI_API_KEY").is_ok() {
         return Some("openai");
+    }
+    if non_empty_env("OPENFANG_STT_LOCAL_ENDPOINT").is_some()
+        || non_empty_env("OPENFANG_STT_LOCAL_BIN").is_some()
+    {
+        return Some("local");
     }
     None
 }
@@ -277,6 +570,7 @@ fn default_audio_model(provider: &str) -> &str {
     match provider {
         "groq" => "whisper-large-v3-turbo",
         "openai" => "whisper-1",
+        "local" => "base",
         _ => "unknown",
     }
 }
@@ -407,6 +701,7 @@ mod tests {
     fn test_default_audio_models() {
         assert_eq!(default_audio_model("groq"), "whisper-large-v3-turbo");
         assert_eq!(default_audio_model("openai"), "whisper-1");
+        assert_eq!(default_audio_model("local"), "base");
     }
 
     #[tokio::test]
@@ -483,5 +778,37 @@ mod tests {
         let result = engine.transcribe_audio(&attachment).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Failed to read audio file"));
+    }
+
+    #[tokio::test]
+    async fn test_transcribe_audio_local_missing_binary() {
+        let config = MediaConfig {
+            audio_provider: Some("local".to_string()),
+            audio_local_endpoint: None,
+            audio_local_bin: "/definitely/missing/whisper".to_string(),
+            ..Default::default()
+        };
+        let engine = MediaEngine::new(config);
+        let attachment = MediaAttachment {
+            media_type: MediaType::Audio,
+            mime_type: "audio/webm".into(),
+            source: MediaSource::Base64 {
+                data: "dGVzdA==".into(),
+                mime_type: "audio/webm".into(),
+            },
+            size_bytes: 4,
+        };
+        let result = engine.transcribe_audio(&attachment).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Failed to start local STT binary"));
+    }
+
+    #[test]
+    fn test_extract_transcription_text_from_json() {
+        let body = br#"{"text":"hallo welt"}"#;
+        let text = extract_transcription_text(body, "application/json");
+        assert_eq!(text.as_deref(), Some("hallo welt"));
     }
 }

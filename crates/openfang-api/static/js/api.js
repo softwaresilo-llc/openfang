@@ -178,7 +178,11 @@ var OpenFangAPI = (function() {
         try { return JSON.parse(t); } catch(e) { return { text: t }; }
       });
     }).catch(function(e) {
-      if (e.name === 'TypeError' && e.message.includes('Failed to fetch')) {
+      var msg = (e && e.message ? String(e.message) : '');
+      var isNetworkFetchError = (e && e.name === 'TypeError' && msg.includes('Failed to fetch'))
+        || msg.includes('NetworkError when attempting to fetch resource')
+        || msg.includes('Load failed');
+      if (isNetworkFetchError) {
         setConnectionState('disconnected');
         throw new Error('Cannot connect to daemon — is openfang running?');
       }

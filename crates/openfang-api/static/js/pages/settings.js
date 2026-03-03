@@ -275,9 +275,48 @@ function settingsPage() {
           OpenFangAPI.get('/api/config/schema').catch(function() { return {}; }),
           OpenFangAPI.get('/api/config')
         ]);
-        this.configSchema = results[0].sections || null;
+        this.configSchema = this.normalizeConfigSchema(results[0].sections || null);
         this.configValues = results[1] || {};
       } catch(e) { /* silent */ }
+    },
+
+    normalizeConfigSchema(sections) {
+      if (!sections || typeof sections !== 'object') return null;
+      var normalized = {};
+      Object.keys(sections).forEach(function(sectionName) {
+        var sectionDef = sections[sectionName] || {};
+        var rawFields = sectionDef.fields || {};
+        var fields = [];
+        Object.keys(rawFields).forEach(function(fieldName) {
+          var spec = rawFields[fieldName];
+          var field = {
+            name: fieldName,
+            label: fieldName.replace(/_/g, ' '),
+            type: 'string'
+          };
+          if (typeof spec === 'string') {
+            field.type = spec;
+          } else if (spec && typeof spec === 'object') {
+            field.type = spec.type || 'string';
+            if (spec.label) field.label = spec.label;
+            if (spec.description) field.description = spec.description;
+            if (Array.isArray(spec.options)) {
+              field.options = spec.options
+                .map(function(opt) {
+                  if (opt && typeof opt === 'object') {
+                    return opt.id || opt.value || opt.name || '';
+                  }
+                  return opt;
+                })
+                .filter(function(opt) { return opt !== undefined && opt !== null && String(opt) !== ''; });
+            }
+          }
+          if (field.type === 'integer') field.type = 'number';
+          fields.push(field);
+        });
+        normalized[sectionName] = fields;
+      });
+      return normalized;
     },
 
     isConfigDirty(section, field) {

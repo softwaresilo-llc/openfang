@@ -4684,6 +4684,11 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "home_dir": config.home_dir.to_string_lossy(),
         "data_dir": config.data_dir.to_string_lossy(),
         "api_key": if config.api_key.is_empty() { "not set" } else { "***" },
+        "api": {
+            "api_listen": config.api_listen,
+            "api_key": "",
+            "log_level": config.log_level,
+        },
         "default_model": {
             "provider": config.default_model.provider,
             "model": config.default_model.model,
