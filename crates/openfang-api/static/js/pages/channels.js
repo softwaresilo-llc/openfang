@@ -104,6 +104,46 @@ function channelsPage() {
       });
     },
 
+    syncDefaultAgentSelect(selectEl, field) {
+      if (!selectEl || !field) return;
+      var key = field.key;
+      var current = this.formValues[key];
+      var saved = (field.value !== undefined && field.value !== null) ? String(field.value) : '';
+      if ((!current || current === '') && saved) {
+        current = saved;
+        this.formValues[key] = saved;
+      }
+      current = current ? String(current) : '';
+
+      var agents = Array.isArray(this.availableAgents) ? this.availableAgents.slice() : [];
+      var showSaved = current && agents.indexOf(current) === -1;
+
+      var html = ['<option value="">(not set)</option>'];
+      if (showSaved) {
+        html.push('<option value="' + this.escapeHtml(current) + '">' + this.escapeHtml(current + ' (saved)') + '</option>');
+      }
+      agents.forEach(function(name) {
+        html.push('<option value="' + this.escapeHtml(name) + '">' + this.escapeHtml(name) + '</option>');
+      }, this);
+
+      var nextHtml = html.join('');
+      if (selectEl.innerHTML !== nextHtml) {
+        selectEl.innerHTML = nextHtml;
+      }
+      if (selectEl.value !== current) {
+        selectEl.value = current;
+      }
+    },
+
+    escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+    },
+
     isQrChannel() {
       return this.setupModal && this.setupModal.setup_type === 'qr';
     },

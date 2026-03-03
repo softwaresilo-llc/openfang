@@ -201,7 +201,8 @@ async function startConnection() {
 
   // Incoming messages → queue for the Rust WhatsApp adapter poll loop
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    // Self-chat / own-device messages can arrive as "append" instead of "notify".
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages) {
       const remoteJid = msg.key.remoteJid || '';
@@ -223,7 +224,10 @@ async function startConnection() {
         || msg.message?.extendedTextMessage?.text
         || msg.message?.imageMessage?.caption
         || '';
-      const phone = '+' + sender.replace(/@.*$/, '');
+      const normalizedSender = normalizedWaIdNumber(sender)
+        || normalizedWaIdNumber(msg.key?.participant || '')
+        || '';
+      const phone = normalizedSender ? ('+' + normalizedSender) : ('+' + sender.replace(/@.*$/, ''));
       const pushName = msg.pushName || phone;
       const tsSeconds = Number(msg.messageTimestamp || 0) || Math.floor(Date.now() / 1000);
       const baseEvent = {
@@ -277,8 +281,12 @@ async function sendMessage(to, text) {
     throw new Error('WhatsApp not connected');
   }
 
-  // Normalize phone → JID: "+1234567890" → "1234567890@s.whatsapp.net"
-  const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  // Normalize phone/JID/lid form → JID: "+1234567890" → "1234567890@s.whatsapp.net"
+  const number = normalizedWaIdNumber(to);
+  if (!number) {
+    throw new Error(`Invalid recipient identifier: ${to}`);
+  }
+  const jid = number + '@s.whatsapp.net';
 
   const sent = await sock.sendMessage(jid, { text });
   const sentId = sent?.key?.id;
@@ -311,7 +319,11 @@ async function sendVoiceMessage(to, voiceUrl, ptt = true) {
     throw new Error('Downloaded voice payload is empty');
   }
 
-  const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  const number = normalizedWaIdNumber(to);
+  if (!number) {
+    throw new Error(`Invalid recipient identifier: ${to}`);
+  }
+  const jid = number + '@s.whatsapp.net';
   const sent = await sock.sendMessage(jid, {
     audio: audioBuffer,
     mimetype: mimeType || 'audio/ogg',
