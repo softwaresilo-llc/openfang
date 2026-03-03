@@ -38,6 +38,9 @@ function agentsPage() {
       profile: 'full',
       caps: { memory_read: true, memory_write: true, network: false, shell: false, agent_spawn: false }
     },
+    spawnProviders: [],
+    spawnModels: [],
+    spawnCatalogLoaded: false,
 
     // -- Multi-step wizard state --
     spawnStep: 1,
@@ -324,6 +327,68 @@ function agentsPage() {
       this.tplLoading = false;
     },
 
+    async loadSpawnCatalog() {
+      if (this.spawnCatalogLoaded) return;
+      try {
+        var results = await Promise.all([
+          OpenFangAPI.get('/api/providers').catch(function() { return { providers: [] }; }),
+          OpenFangAPI.get('/api/models').catch(function() { return { models: [] }; })
+        ]);
+        this.spawnProviders = results[0].providers || [];
+        this.spawnModels = results[1].models || [];
+        this.spawnCatalogLoaded = true;
+        this.syncSpawnModelSelection();
+      } catch(e) {
+        this.spawnProviders = [];
+        this.spawnModels = [];
+      }
+    },
+
+    spawnProviderOptions() {
+      if (this.spawnProviders.length > 0) return this.spawnProviders;
+      return [
+        { id: 'anthropic', display_name: 'Anthropic' },
+        { id: 'openai', display_name: 'OpenAI' },
+        { id: 'groq', display_name: 'Groq' },
+        { id: 'ollama', display_name: 'Ollama' },
+        { id: 'google', display_name: 'Google' },
+        { id: 'mistral', display_name: 'Mistral' },
+        { id: 'xai', display_name: 'xAI' },
+        { id: 'deepseek', display_name: 'DeepSeek' },
+        { id: 'cerebras', display_name: 'Cerebras' },
+        { id: 'sambanova', display_name: 'SambaNova' },
+        { id: 'together', display_name: 'Together' },
+        { id: 'claude-code', display_name: 'Claude Code' },
+        { id: 'codex-cli', display_name: 'Codex CLI' },
+        { id: 'gemini-cli', display_name: 'Gemini CLI' },
+        { id: 'opencode-cli', display_name: 'OpenCode CLI' }
+      ];
+    },
+
+    spawnModelsForSelectedProvider() {
+      var provider = this.spawnForm.provider || '';
+      if (!provider || !this.spawnModels.length) return [];
+      return this.spawnModels.filter(function(m) { return m.provider === provider; });
+    },
+
+    onSpawnProviderChange() {
+      this.syncSpawnModelSelection();
+    },
+
+    syncSpawnModelSelection() {
+      var providers = this.spawnProviderOptions();
+      if (providers.length && !providers.some(function(p) { return p.id === this.spawnForm.provider; }, this)) {
+        this.spawnForm.provider = providers[0].id;
+      }
+      var models = this.spawnModelsForSelectedProvider();
+      if (!models.length) return;
+      var current = this.spawnForm.model || '';
+      var currentKnown = models.some(function(m) { return m.id === current; });
+      if (!currentKnown) {
+        this.spawnForm.model = models[0].id;
+      }
+    },
+
     chatWithAgent(agent) {
       Alpine.store('app').pendingAgent = agent;
       this.activeChatAgent = agent;
@@ -403,6 +468,8 @@ function agentsPage() {
       this.spawnForm.name = '';
       this.spawnForm.systemPrompt = 'You are a helpful assistant.';
       this.spawnForm.profile = 'full';
+      this.loadSpawnCatalog();
+      this.syncSpawnModelSelection();
     },
 
     nextStep() {

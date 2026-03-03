@@ -1137,18 +1137,22 @@
                   <div x-show="spawnStep === 2">
                     <div class="form-group">
                       <label>Provider</label>
-                      <select class="form-select" x-model="spawnForm.provider">
-                        <option value="anthropic">Anthropic</option><option value="openai">OpenAI</option>
-                        <option value="groq">Groq</option><option value="ollama">Ollama</option>
-                        <option value="google">Google</option><option value="mistral">Mistral</option>
-                        <option value="xai">xAI</option><option value="deepseek">DeepSeek</option>
-                        <option value="cerebras">Cerebras</option><option value="sambanova">SambaNova</option>
-                        <option value="together">Together</option>
+                      <select class="form-select" x-model="spawnForm.provider" @change="onSpawnProviderChange()">
+                        <template x-for="p in spawnProviderOptions()" :key="p.id">
+                          <option :value="p.id" x-text="p.display_name || p.id"></option>
+                        </template>
                       </select>
+                      <div class="text-xs text-dim mt-1" x-show="spawnProviders.length === 0">Using built-in provider fallback list.</div>
                     </div>
                     <div class="form-group">
                       <label>Model</label>
-                      <input class="form-input" x-model="spawnForm.model" placeholder="e.g. llama-3.3-70b-versatile">
+                      <input class="form-input" x-model="spawnForm.model" list="spawn-model-options" placeholder="e.g. llama-3.3-70b-versatile">
+                      <datalist id="spawn-model-options">
+                        <template x-for="m in spawnModelsForSelectedProvider()" :key="m.id">
+                          <option :value="m.id" :label="m.display_name || m.id"></option>
+                        </template>
+                      </datalist>
+                      <div class="text-xs text-dim mt-1" x-show="spawnModelsForSelectedProvider().length > 0" x-text="'Suggestions loaded for provider: ' + spawnForm.provider"></div>
                     </div>
                     <div class="form-group">
                       <label>System Prompt</label>
