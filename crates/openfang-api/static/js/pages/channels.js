@@ -77,6 +77,15 @@ function channelsPage() {
       return this.setupModal.fields.filter(function(f) { return f.advanced; });
     },
 
+    whatsappVoiceFields() {
+      if (!this.setupModal || !this.setupModal.fields || this.setupModal.name !== 'whatsapp') return [];
+      return this.setupModal.fields.filter(function(f) { return f.key.indexOf('voice.') === 0; });
+    },
+
+    hasWhatsappVoiceFields() {
+      return this.whatsappVoiceFields().length > 0;
+    },
+
     hasAdvanced() {
       return this.advancedFields().length > 0;
     },
@@ -238,6 +247,21 @@ function channelsPage() {
         } catch(te) {
           OpenFangToast.success(this.setupModal.display_name + ' saved. Test to verify connection.');
         }
+        await this.refreshStatus();
+      } catch(e) {
+        OpenFangToast.error('Failed: ' + (e.message || 'Unknown error'));
+      }
+      this.configuring = false;
+    },
+
+    async saveWhatsappVoiceConfig() {
+      if (!this.setupModal || this.setupModal.name !== 'whatsapp') return;
+      this.configuring = true;
+      try {
+        await OpenFangAPI.post('/api/channels/whatsapp/configure', {
+          fields: this.formValues
+        });
+        OpenFangToast.success('WhatsApp voice settings saved.');
         await this.refreshStatus();
       } catch(e) {
         OpenFangToast.error('Failed: ' + (e.message || 'Unknown error'));

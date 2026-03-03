@@ -71,6 +71,65 @@ pub struct ChannelOverrides {
     pub typing_mode: Option<TypingMode>,
 }
 
+/// Voice reply mode for channel responses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceReplyMode {
+    /// Never synthesize voice replies.
+    #[default]
+    Off,
+    /// Synthesize voice replies only when auto-trigger rules match.
+    Auto,
+    /// Always synthesize voice replies (with text fallback on failure).
+    Always,
+}
+
+/// Preferred voice language for channel TTS.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceLanguage {
+    /// German.
+    #[default]
+    De,
+    /// English.
+    En,
+}
+
+impl VoiceLanguage {
+    /// Return the language tag string used by channel/runtime integrations.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::De => "de",
+            Self::En => "en",
+        }
+    }
+}
+
+/// Channel voice configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChannelVoiceConfig {
+    /// Voice reply policy.
+    pub reply_mode: VoiceReplyMode,
+    /// Default language for synthesized replies.
+    pub default_language: VoiceLanguage,
+    /// Auto mode threshold: synthesize when reply length >= this value.
+    pub auto_min_text_length: usize,
+    /// Auto mode keywords (case-insensitive substring match).
+    pub auto_keywords: Vec<String>,
+}
+
+impl Default for ChannelVoiceConfig {
+    fn default() -> Self {
+        Self {
+            reply_mode: VoiceReplyMode::Off,
+            default_language: VoiceLanguage::De,
+            auto_min_text_length: 120,
+            auto_keywords: Vec::new(),
+        }
+    }
+}
+
 /// Controls what usage info appears in response footers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1623,6 +1682,9 @@ pub struct WhatsAppConfig {
     pub allowed_users: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Voice reply behavior.
+    #[serde(default)]
+    pub voice: ChannelVoiceConfig,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -1638,6 +1700,7 @@ impl Default for WhatsAppConfig {
             gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
             allowed_users: vec![],
             default_agent: None,
+            voice: ChannelVoiceConfig::default(),
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3307,6 +3370,8 @@ mod tests {
         assert_eq!(wa.access_token_env, "WHATSAPP_ACCESS_TOKEN");
         assert_eq!(wa.webhook_port, 8443);
         assert!(wa.allowed_users.is_empty());
+        assert_eq!(wa.voice.reply_mode, VoiceReplyMode::Off);
+        assert_eq!(wa.voice.default_language, VoiceLanguage::De);
     }
 
     #[test]
@@ -3342,6 +3407,23 @@ mod tests {
         let json = serde_json::to_string(&wa).unwrap();
         let back: WhatsAppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.phone_number_id, "12345");
+        assert_eq!(back.voice.reply_mode, VoiceReplyMode::Off);
+    }
+
+    #[test]
+    fn test_whatsapp_voice_config_serde() {
+        let cfg = ChannelVoiceConfig {
+            reply_mode: VoiceReplyMode::Auto,
+            default_language: VoiceLanguage::En,
+            auto_min_text_length: 80,
+            auto_keywords: vec!["status".to_string(), "report".to_string()],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: ChannelVoiceConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.reply_mode, VoiceReplyMode::Auto);
+        assert_eq!(back.default_language, VoiceLanguage::En);
+        assert_eq!(back.auto_min_text_length, 80);
+        assert_eq!(back.auto_keywords, vec!["status", "report"]);
     }
 
     #[test]

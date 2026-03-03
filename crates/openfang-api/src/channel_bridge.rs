@@ -3,7 +3,7 @@
 //! Implements `ChannelBridgeHandle` on `OpenFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
-use openfang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
+use openfang_channels::bridge::{BridgeManager, ChannelBridgeHandle, VoiceAsset};
 use openfang_channels::discord::DiscordAdapter;
 use openfang_channels::email::EmailAdapter;
 use openfang_channels::google_chat::GoogleChatAdapter;
@@ -52,6 +52,7 @@ use openfang_channels::ntfy::NtfyAdapter;
 use openfang_channels::webhook::WebhookAdapter;
 use openfang_kernel::OpenFangKernel;
 use openfang_types::agent::AgentId;
+use openfang_types::config::VoiceLanguage;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -60,6 +61,29 @@ use tracing::{error, info, warn};
 pub struct KernelBridgeAdapter {
     kernel: Arc<OpenFangKernel>,
     started_at: Instant,
+}
+
+fn tts_format_to_content_type(format: &str) -> &'static str {
+    match format {
+        "wav" => "audio/wav",
+        "ogg" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "m4a" | "mp4" => "audio/mp4",
+        _ => "audio/mpeg",
+    }
+}
+
+fn local_api_base_url(api_listen: &str) -> String {
+    // Force a loopback host for local gateway fetches.
+    // If parsing fails, use the OpenFang default.
+    if let Some((_, port)) = api_listen.rsplit_once(':') {
+        let port = port.trim();
+        if !port.is_empty() {
+            return format!("http://127.0.0.1:{port}");
+        }
+    }
+    "http://127.0.0.1:4200".to_string()
 }
 
 #[async_trait]
@@ -737,6 +761,109 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn channel_voice_config(
+        &self,
+        channel_type: &str,
+    ) -> Option<openfang_types::config::ChannelVoiceConfig> {
+        match channel_type {
+            "whatsapp" => self
+                .kernel
+                .config
+                .channels
+                .whatsapp
+                .as_ref()
+                .map(|c| c.voice.clone()),
+            _ => None,
+        }
+    }
+
+    async fn transcribe_voice_url(
+        &self,
+        _channel_type: &str,
+        media_url: &str,
+    ) -> Result<Option<String>, String> {
+        let response = reqwest::get(media_url)
+            .await
+            .map_err(|e| format!("Failed to download voice media: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Voice media download failed with status {}",
+                response.status()
+            ));
+        }
+
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap_or(v).trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "audio/ogg".to_string());
+
+        if !mime.starts_with("audio/") {
+            return Err(format!("Unsupported voice media content type: {mime}"));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed reading voice media bytes: {e}"))?;
+        if bytes.is_empty() {
+            return Err("Voice media is empty".to_string());
+        }
+
+        use base64::Engine;
+        let attachment = openfang_types::media::MediaAttachment {
+            media_type: openfang_types::media::MediaType::Audio,
+            mime_type: mime.clone(),
+            source: openfang_types::media::MediaSource::Base64 {
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                mime_type: mime,
+            },
+            size_bytes: bytes.len() as u64,
+        };
+
+        let result = self
+            .kernel
+            .media_engine
+            .transcribe_audio(&attachment)
+            .await
+            .map_err(|e| format!("Voice transcription failed: {e}"))?;
+        Ok(Some(result.description))
+    }
+
+    async fn synthesize_voice(
+        &self,
+        _channel_type: &str,
+        text: &str,
+        _language: VoiceLanguage,
+    ) -> Result<Option<VoiceAsset>, String> {
+        if !self.kernel.config.tts.enabled {
+            return Ok(None);
+        }
+
+        let synthesized = self
+            .kernel
+            .tts_engine
+            .synthesize(text, None, None)
+            .await
+            .map_err(|e| format!("Voice synthesis failed: {e}"))?;
+
+        let content_type = tts_format_to_content_type(&synthesized.format);
+        let filename = format!("channel_voice.{}", synthesized.format);
+        let file_id =
+            crate::routes::persist_upload_blob(&filename, content_type, &synthesized.audio_data)?;
+        let base_url = local_api_base_url(&self.kernel.config.api_listen);
+        let duration_seconds = ((synthesized.duration_estimate_ms as f64) / 1000.0)
+            .ceil()
+            .max(1.0) as u32;
+
+        Ok(Some(VoiceAsset {
+            url: format!("{base_url}/api/uploads/{file_id}"),
+            duration_seconds,
+        }))
+    }
+
     async fn authorize_channel_user(
         &self,
         channel_type: &str,
@@ -1088,7 +1215,9 @@ pub async fn start_channel_bridge_with_config(
     // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
     if let Some(ref wa_config) = config.whatsapp {
         let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
-        let gateway_url = std::env::var(&wa_config.gateway_url_env).ok().filter(|u| !u.is_empty());
+        let gateway_url = std::env::var(&wa_config.gateway_url_env)
+            .ok()
+            .filter(|u| !u.is_empty());
 
         if cloud_token.is_some() || gateway_url.is_some() {
             let token = cloud_token.unwrap_or_default();

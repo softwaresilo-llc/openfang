@@ -9,7 +9,6 @@ const { randomUUID } = require('node:crypto');
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const OPENFANG_URL = (process.env.OPENFANG_URL || 'http://127.0.0.1:4200').replace(/\/+$/, '');
-const DEFAULT_AGENT = process.env.OPENFANG_DEFAULT_AGENT || 'assistant';
 
 // ---------------------------------------------------------------------------
 // State
@@ -20,13 +19,55 @@ let qrDataUrl = '';       // latest QR code as data:image/png;base64,...
 let connStatus = 'disconnected'; // disconnected | qr_ready | connected
 let qrExpired = false;
 let statusMessage = 'Not started';
+const inboundEvents = []; // queued inbound events for the Rust channel adapter
+const MAX_INBOUND_EVENTS = 200;
+const mediaStore = new Map(); // mediaId -> { data: Buffer, mimeType: string, expiresAt: number }
+const MEDIA_TTL_MS = 5 * 60 * 1000;
+
+function enqueueInboundEvent(event) {
+  if (!event) return;
+  if (inboundEvents.length >= MAX_INBOUND_EVENTS) inboundEvents.shift();
+  inboundEvents.push(event);
+}
+
+function dequeueInboundEvent() {
+  if (!inboundEvents.length) return null;
+  return inboundEvents.shift() || null;
+}
+
+function saveMedia(buffer, mimeType) {
+  const mediaId = randomUUID();
+  mediaStore.set(mediaId, {
+    data: Buffer.from(buffer),
+    mimeType: mimeType || 'application/octet-stream',
+    expiresAt: Date.now() + MEDIA_TTL_MS,
+  });
+  return mediaId;
+}
+
+function readMedia(mediaId) {
+  const item = mediaStore.get(mediaId);
+  if (!item) return null;
+  if (Date.now() > item.expiresAt) {
+    mediaStore.delete(mediaId);
+    return null;
+  }
+  return item;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, item] of mediaStore.entries()) {
+    if (now > item.expiresAt) mediaStore.delete(id);
+  }
+}, 30_000);
 
 // ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function startConnection() {
   // Dynamic imports — Baileys is ESM-only in v6+
-  const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } =
+  const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, downloadMediaMessage } =
     await import('@whiskeysockets/baileys');
   const QRCode = (await import('qrcode')).default || await import('qrcode');
   const pino = (await import('pino')).default || await import('pino');
@@ -115,7 +156,7 @@ async function startConnection() {
     }
   });
 
-  // Incoming messages → forward to OpenFang
+  // Incoming messages → queue for the Rust WhatsApp adapter poll loop
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
@@ -129,80 +170,49 @@ async function startConnection() {
         || msg.message?.extendedTextMessage?.text
         || msg.message?.imageMessage?.caption
         || '';
-
-      if (!text) continue;
-
-      // Extract phone number from JID (e.g. "1234567890@s.whatsapp.net" → "+1234567890")
       const phone = '+' + sender.replace(/@.*$/, '');
       const pushName = msg.pushName || phone;
+      const tsSeconds = Number(msg.messageTimestamp || 0) || Math.floor(Date.now() / 1000);
+      const baseEvent = {
+        message_id: msg.key.id || randomUUID(),
+        chat_jid: sender,
+        sender_phone: phone,
+        sender_name: pushName,
+        is_group: sender.endsWith('@g.us'),
+        timestamp: tsSeconds,
+      };
 
-      console.log(`[gateway] Incoming from ${pushName} (${phone}): ${text.substring(0, 80)}`);
+      if (text && text.trim()) {
+        enqueueInboundEvent({
+          type: 'text',
+          ...baseEvent,
+          text,
+        });
+        console.log(`[gateway] Queued text from ${pushName} (${phone}): ${text.substring(0, 80)}`);
+        continue;
+      }
 
-      // Forward to OpenFang agent
-      try {
-        const response = await forwardToOpenFang(text, phone, pushName);
-        if (response && sock) {
-          // Send agent response back to WhatsApp
-          await sock.sendMessage(sender, { text: response });
-          console.log(`[gateway] Replied to ${pushName}`);
+      // Voice note / audio fallback path
+      if (msg.message?.audioMessage || msg.message?.pttMessage) {
+        try {
+          const audio = msg.message?.audioMessage || msg.message?.pttMessage;
+          const mediaBuffer = await downloadMediaMessage(msg, 'buffer', {});
+          if (mediaBuffer && mediaBuffer.length > 0) {
+            const mimeType = audio?.mimetype || 'audio/ogg';
+            const mediaId = saveMedia(mediaBuffer, mimeType);
+            enqueueInboundEvent({
+              type: 'voice',
+              ...baseEvent,
+              voice_url: `http://127.0.0.1:${PORT}/media/${mediaId}`,
+              duration_seconds: Number(audio?.seconds || 0) || 0,
+            });
+            console.log(`[gateway] Queued voice from ${pushName} (${phone})`);
+          }
+        } catch (err) {
+          console.error('[gateway] Failed to decode inbound audio:', err.message);
         }
-      } catch (err) {
-        console.error(`[gateway] Forward/reply failed:`, err.message);
       }
     }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Forward incoming message to OpenFang API, return agent response
-// ---------------------------------------------------------------------------
-function forwardToOpenFang(text, phone, pushName) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({
-      message: text,
-      metadata: {
-        channel: 'whatsapp',
-        sender: phone,
-        sender_name: pushName,
-      },
-    });
-
-    const url = new URL(`${OPENFANG_URL}/api/agents/${encodeURIComponent(DEFAULT_AGENT)}/message`);
-
-    const req = http.request(
-      {
-        hostname: url.hostname,
-        port: url.port || 4200,
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-        timeout: 120_000, // LLM calls can be slow
-      },
-      (res) => {
-        let body = '';
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          try {
-            const data = JSON.parse(body);
-            // The /api/agents/{id}/message endpoint returns { response: "..." }
-            resolve(data.response || data.message || data.text || '');
-          } catch {
-            resolve(body.trim() || '');
-          }
-        });
-      },
-    );
-
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('OpenFang API timeout'));
-    });
-    req.write(payload);
-    req.end();
   });
 }
 
@@ -218,6 +228,38 @@ async function sendMessage(to, text) {
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
   await sock.sendMessage(jid, { text });
+}
+
+async function sendVoiceMessage(to, voiceUrl, ptt = true) {
+  if (!sock || connStatus !== 'connected') {
+    throw new Error('WhatsApp not connected');
+  }
+  if (!voiceUrl) {
+    throw new Error('voiceUrl is required');
+  }
+
+  const normalizedUrl = /^https?:\/\//i.test(voiceUrl)
+    ? voiceUrl
+    : `${OPENFANG_URL}${voiceUrl.startsWith('/') ? '' : '/'}${voiceUrl}`;
+
+  const response = await fetch(normalizedUrl, { signal: AbortSignal.timeout(20_000) });
+  if (!response.ok) {
+    throw new Error(`Voice download failed (${response.status})`);
+  }
+
+  const mimeType = (response.headers.get('content-type') || 'audio/ogg').split(';')[0].trim();
+  const arrayBuf = await response.arrayBuffer();
+  const audioBuffer = Buffer.from(arrayBuf);
+  if (!audioBuffer.length) {
+    throw new Error('Downloaded voice payload is empty');
+  }
+
+  const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
+  await sock.sendMessage(jid, {
+    audio: audioBuffer,
+    mimetype: mimeType || 'audio/ogg',
+    ptt: !!ptt,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +344,34 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // GET /events/poll — long-poll next inbound WhatsApp event for Rust adapter
+    if (req.method === 'GET' && path === '/events/poll') {
+      const rawTimeout = Number.parseInt(url.searchParams.get('timeout_ms') || '25000', 10);
+      const timeoutMs = Number.isFinite(rawTimeout) ? Math.max(1000, Math.min(60000, rawTimeout)) : 25000;
+      let event = dequeueInboundEvent();
+      let waited = 0;
+      while (!event && waited < timeoutMs) {
+        await new Promise((r) => setTimeout(r, 200));
+        waited += 200;
+        event = dequeueInboundEvent();
+      }
+      return jsonResponse(res, 200, { event });
+    }
+
+    // GET /media/:id — serve short-lived media cached from inbound voice notes
+    if (req.method === 'GET' && path.startsWith('/media/')) {
+      const mediaId = path.slice('/media/'.length).trim();
+      if (!mediaId) return jsonResponse(res, 400, { error: 'Missing media id' });
+      const item = readMedia(mediaId);
+      if (!item) return jsonResponse(res, 404, { error: 'Media not found or expired' });
+      res.writeHead(200, {
+        'Content-Type': item.mimeType || 'application/octet-stream',
+        'Content-Length': item.data.length,
+        'Access-Control-Allow-Origin': '*',
+      });
+      return res.end(item.data);
+    }
+
     // POST /message/send — send outgoing message via Baileys
     if (req.method === 'POST' && path === '/message/send') {
       const body = await parseBody(req);
@@ -313,6 +383,17 @@ const server = http.createServer(async (req, res) => {
 
       await sendMessage(to, text);
       return jsonResponse(res, 200, { success: true, message: 'Sent' });
+    }
+
+    // POST /message/send_voice — send outgoing audio/voice via Baileys
+    if (req.method === 'POST' && path === '/message/send_voice') {
+      const body = await parseBody(req);
+      const { to, voice_url: voiceUrl, ptt } = body;
+      if (!to || !voiceUrl) {
+        return jsonResponse(res, 400, { error: 'Missing "to" or "voice_url" field' });
+      }
+      await sendVoiceMessage(to, voiceUrl, ptt !== false);
+      return jsonResponse(res, 200, { success: true, message: 'Voice sent' });
     }
 
     // GET /health — health check
@@ -335,8 +416,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] OpenFang URL: ${OPENFANG_URL}`);
-  console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
-  console.log('[gateway] Waiting for POST /login/start to begin QR flow...');
+  console.log('[gateway] Waiting for POST /login/start and /events/poll ...');
 });
 
 // Graceful shutdown

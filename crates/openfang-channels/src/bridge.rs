@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
 use openfang_types::agent::AgentId;
-use openfang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
+use openfang_types::config::{
+    ChannelOverrides, ChannelVoiceConfig, DmPolicy, GroupPolicy, OutputFormat, VoiceLanguage,
+    VoiceReplyMode,
+};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -20,6 +23,14 @@ use tracing::{debug, error, info, warn};
 ///
 /// Defined here to avoid circular deps (openfang-channels can't depend on openfang-kernel).
 /// Implemented in openfang-api on the actual kernel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VoiceAsset {
+    /// URL that the channel adapter can send as voice/audio media.
+    pub url: String,
+    /// Estimated duration for UI/client hints.
+    pub duration_seconds: u32,
+}
+
 #[async_trait]
 pub trait ChannelBridgeHandle: Send + Sync {
     /// Send a message to an agent and get the text response.
@@ -108,6 +119,36 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Returns `None` if the channel is not configured or has no overrides.
     async fn channel_overrides(&self, _channel_type: &str) -> Option<ChannelOverrides> {
         None
+    }
+
+    /// Return channel voice behavior config, if supported by this channel.
+    async fn channel_voice_config(&self, _channel_type: &str) -> Option<ChannelVoiceConfig> {
+        None
+    }
+
+    /// Transcribe a voice/media URL to plain text.
+    ///
+    /// Returns `Ok(Some(text))` on successful transcription.
+    /// Returns `Ok(None)` if the handle chooses not to transcribe for this channel.
+    async fn transcribe_voice_url(
+        &self,
+        _channel_type: &str,
+        _media_url: &str,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// Synthesize text into a voice asset that the adapter can send.
+    ///
+    /// Returns `Ok(Some(asset))` when synthesis succeeds.
+    /// Returns `Ok(None)` if synthesis is unavailable for this channel/runtime.
+    async fn synthesize_voice(
+        &self,
+        _channel_type: &str,
+        _text: &str,
+        _language: VoiceLanguage,
+    ) -> Result<Option<VoiceAsset>, String> {
+        Ok(None)
     }
 
     /// Record a delivery result for tracking (optional — default no-op).
@@ -359,6 +400,50 @@ async fn send_response(
     }
 }
 
+/// Send a synthesized voice response asset.
+async fn send_voice_response(
+    adapter: &dyn ChannelAdapter,
+    user: &ChannelUser,
+    voice: VoiceAsset,
+    thread_id: Option<&str>,
+) -> Result<(), String> {
+    let content = ChannelContent::Voice {
+        url: voice.url,
+        duration_seconds: voice.duration_seconds,
+    };
+    let result = if let Some(tid) = thread_id {
+        adapter.send_in_thread(user, content, tid).await
+    } else {
+        adapter.send(user, content).await
+    };
+    result.map_err(|e| e.to_string())
+}
+
+/// Decide if a text response should be delivered as voice.
+fn should_send_voice_reply(text: &str, cfg: &ChannelVoiceConfig) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    match cfg.reply_mode {
+        VoiceReplyMode::Off => false,
+        VoiceReplyMode::Always => true,
+        VoiceReplyMode::Auto => {
+            if trimmed.chars().count() >= cfg.auto_min_text_length {
+                return true;
+            }
+            if cfg.auto_keywords.is_empty() {
+                return false;
+            }
+            let lowered = trimmed.to_lowercase();
+            cfg.auto_keywords.iter().any(|kw| {
+                let k = kw.trim().to_lowercase();
+                !k.is_empty() && lowered.contains(&k)
+            })
+        }
+    }
+}
+
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
@@ -439,6 +524,8 @@ async fn dispatch_message(
         }
     }
 
+    let inbound_is_voice = matches!(&message.content, ChannelContent::Voice { .. });
+
     let text = match &message.content {
         ChannelContent::Text(t) => t.clone(),
         ChannelContent::Command { name, args } => {
@@ -446,6 +533,32 @@ async fn dispatch_message(
             send_response(adapter, &message.sender, result, thread_id, output_format).await;
             return;
         }
+        ChannelContent::Voice { url, .. } => match handle.transcribe_voice_url(ct_str, url).await {
+            Ok(Some(transcript)) if !transcript.trim().is_empty() => transcript,
+            Ok(_) => {
+                send_response(
+                    adapter,
+                    &message.sender,
+                    "I received your voice note but could not transcribe it.".to_string(),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                warn!("Voice transcription failed on {ct_str}: {e}");
+                send_response(
+                    adapter,
+                    &message.sender,
+                    "Voice transcription failed. Please retry or send text.".to_string(),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                return;
+            }
+        },
         _ => {
             send_response(
                 adapter,
@@ -625,7 +738,43 @@ async fn dispatch_message(
     // Send to agent and relay response
     match handle.send_message(agent_id, &text).await {
         Ok(response) => {
-            send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            let mut delivered_as_voice = false;
+            if let Some(voice_cfg) = handle.channel_voice_config(ct_str).await {
+                let wants_voice = match voice_cfg.reply_mode {
+                    VoiceReplyMode::Off => false,
+                    VoiceReplyMode::Always => true,
+                    VoiceReplyMode::Auto => {
+                        inbound_is_voice || should_send_voice_reply(&response, &voice_cfg)
+                    }
+                };
+                if wants_voice {
+                    match handle
+                        .synthesize_voice(ct_str, &response, voice_cfg.default_language)
+                        .await
+                    {
+                        Ok(Some(asset)) => {
+                            if let Err(e) =
+                                send_voice_response(adapter, &message.sender, asset, thread_id)
+                                    .await
+                            {
+                                warn!("Voice send failed on {ct_str}, falling back to text: {e}");
+                            } else {
+                                delivered_as_voice = true;
+                            }
+                        }
+                        Ok(None) => {
+                            debug!("Voice synthesis unavailable for {ct_str}, using text fallback");
+                        }
+                        Err(e) => {
+                            warn!("Voice synthesis failed on {ct_str}, using text fallback: {e}");
+                        }
+                    }
+                }
+            }
+
+            if !delivered_as_voice {
+                send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            }
             handle
                 .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None)
                 .await;
@@ -1092,5 +1241,18 @@ mod tests {
             channel_type_str(&ChannelType::Custom("irc".to_string())),
             "irc"
         );
+    }
+
+    #[test]
+    fn test_voice_policy_auto_threshold_and_keywords() {
+        let cfg = ChannelVoiceConfig {
+            reply_mode: VoiceReplyMode::Auto,
+            default_language: VoiceLanguage::De,
+            auto_min_text_length: 10,
+            auto_keywords: vec!["status".to_string()],
+        };
+        assert!(should_send_voice_reply("this is long enough", &cfg));
+        assert!(should_send_voice_reply("quick STATUS update", &cfg));
+        assert!(!should_send_voice_reply("short", &cfg));
     }
 }
