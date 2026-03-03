@@ -516,8 +516,7 @@ impl App {
             }
             AppEvent::CommsEventsLoaded(events) => {
                 self.comms.events = events;
-                if !self.comms.events.is_empty()
-                    && self.comms.event_list_state.selected().is_none()
+                if !self.comms.events.is_empty() && self.comms.event_list_state.selected().is_none()
                 {
                     self.comms.event_list_state.select(Some(0));
                 }

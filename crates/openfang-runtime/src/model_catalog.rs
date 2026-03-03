@@ -55,6 +55,26 @@ impl ModelCatalog {
     /// Only checks presence — never reads or stores the actual secret.
     pub fn detect_auth(&mut self) {
         for provider in &mut self.providers {
+            // CLI-backed providers use binary/login presence instead of API keys.
+            if matches!(
+                provider.id.as_str(),
+                "claude-code" | "codex-cli" | "gemini-cli" | "opencode-cli"
+            ) {
+                let available = match provider.id.as_str() {
+                    "claude-code" => crate::drivers::claude_code::claude_code_available(),
+                    "codex-cli" => crate::drivers::codex_cli::codex_cli_available(),
+                    "gemini-cli" => crate::drivers::gemini_cli::gemini_cli_available(),
+                    "opencode-cli" => crate::drivers::opencode_cli::opencode_cli_available(),
+                    _ => false,
+                };
+                provider.auth_status = if available {
+                    AuthStatus::Configured
+                } else {
+                    AuthStatus::Missing
+                };
+                continue;
+            }
+
             if !provider.key_required {
                 provider.auth_status = AuthStatus::NotRequired;
                 continue;
@@ -67,10 +87,8 @@ impl ModelCatalog {
             let has_fallback = match provider.id.as_str() {
                 "gemini" => std::env::var("GOOGLE_API_KEY").is_ok(),
                 "codex" => {
-                    std::env::var("OPENAI_API_KEY").is_ok()
-                        || read_codex_credential().is_some()
+                    std::env::var("OPENAI_API_KEY").is_ok() || read_codex_credential().is_some()
                 }
-                "claude-code" => crate::drivers::claude_code::claude_code_available(),
                 _ => false,
             };
 
@@ -714,6 +732,34 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             auth_status: AuthStatus::NotRequired,
             model_count: 0,
         },
+        // ── Codex CLI / Gemini CLI / OpenCode CLI ───────────────────
+        ProviderInfo {
+            id: "codex-cli".into(),
+            display_name: "Codex CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "gemini-cli".into(),
+            display_name: "Gemini CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "opencode-cli".into(),
+            display_name: "OpenCode CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
     ]
 }
 
@@ -774,7 +820,11 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("minimax-m2.1", "MiniMax-M2.1"),
         ("codegeex", "codegeex-4"),
         // Codex aliases
-        ("codex", "codex/gpt-4.1"),
+        ("codex", "gpt-5.3-codex"),
+        ("codex-5.3", "gpt-5.3-codex"),
+        ("codex-5.2", "gpt-5.2-codex"),
+        ("codex-max", "gpt-5.1-codex-max"),
+        // Legacy Codex aliases (kept for compatibility)
         ("codex-4.1", "codex/gpt-4.1"),
         ("codex-o4", "codex/o4-mini"),
         // Venice aliases
@@ -784,6 +834,10 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("claude-code-opus", "claude-code/opus"),
         ("claude-code-sonnet", "claude-code/sonnet"),
         ("claude-code-haiku", "claude-code/haiku"),
+        // CLI provider aliases
+        ("codex-cli", "codex-cli/default"),
+        ("gemini-cli", "gemini-cli/default"),
+        ("opencode-cli", "opencode-cli/default"),
     ];
     pairs
         .into_iter()
@@ -3107,8 +3161,50 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec![],
         },
         // ══════════════════════════════════════════════════════════════
-        // OpenAI Codex (2) — reuses OpenAI driver
+        // OpenAI Codex (5) — reuses OpenAI driver
         // ══════════════════════════════════════════════════════════════
+        ModelCatalogEntry {
+            id: "gpt-5.3-codex".into(),
+            display_name: "GPT-5.3 Codex".into(),
+            provider: "codex".into(),
+            tier: ModelTier::Frontier,
+            context_window: 272_000,
+            max_output_tokens: 10_000,
+            input_cost_per_m: 2.00,
+            output_cost_per_m: 8.00,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["codex".into(), "codex-5.3".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.2-codex".into(),
+            display_name: "GPT-5.2 Codex".into(),
+            provider: "codex".into(),
+            tier: ModelTier::Smart,
+            context_window: 272_000,
+            max_output_tokens: 10_000,
+            input_cost_per_m: 1.75,
+            output_cost_per_m: 14.00,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["codex-5.2".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.1-codex-max".into(),
+            display_name: "GPT-5.1 Codex Max".into(),
+            provider: "codex".into(),
+            tier: ModelTier::Smart,
+            context_window: 272_000,
+            max_output_tokens: 10_000,
+            input_cost_per_m: 1.25,
+            output_cost_per_m: 10.00,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["codex-max".into()],
+        },
         ModelCatalogEntry {
             id: "codex/gpt-4.1".into(),
             display_name: "GPT-4.1 (Codex)".into(),
@@ -3121,7 +3217,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_tools: true,
             supports_vision: true,
             supports_streaming: true,
-            aliases: vec!["codex".into(), "codex-4.1".into()],
+            aliases: vec!["codex-4.1".into()],
         },
         ModelCatalogEntry {
             id: "codex/o4-mini".into(),
@@ -3227,6 +3323,52 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_streaming: true,
             aliases: vec![],
         },
+        // ══════════════════════════════════════════════════════════════
+        // Generic CLI providers (3)
+        // ══════════════════════════════════════════════════════════════
+        ModelCatalogEntry {
+            id: "codex-cli/default".into(),
+            display_name: "Codex CLI (Default Model)".into(),
+            provider: "codex-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["codex-cli".into()],
+        },
+        ModelCatalogEntry {
+            id: "gemini-cli/default".into(),
+            display_name: "Gemini CLI (Default Model)".into(),
+            provider: "gemini-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 1_000_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["gemini-cli".into()],
+        },
+        ModelCatalogEntry {
+            id: "opencode-cli/default".into(),
+            display_name: "OpenCode CLI (Default Model)".into(),
+            provider: "opencode-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["opencode-cli".into()],
+        },
+        },
     ]
 }
 
@@ -3243,7 +3385,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 35);
+        assert_eq!(catalog.list_providers().len(), 38);
     }
 
     #[test]
@@ -3278,10 +3420,7 @@ mod tests {
     #[test]
     fn test_resolve_alias() {
         let catalog = ModelCatalog::new();
-        assert_eq!(
-            catalog.resolve_alias("sonnet"),
-            Some("claude-sonnet-4-6")
-        );
+        assert_eq!(catalog.resolve_alias("sonnet"), Some("claude-sonnet-4-6"));
         assert_eq!(
             catalog.resolve_alias("haiku"),
             Some("claude-haiku-4-5-20251001")
@@ -3563,7 +3702,10 @@ mod tests {
     fn test_codex_models() {
         let catalog = ModelCatalog::new();
         let models = catalog.models_by_provider("codex");
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 5);
+        assert!(models.iter().any(|m| m.id == "gpt-5.3-codex"));
+        assert!(models.iter().any(|m| m.id == "gpt-5.2-codex"));
+        assert!(models.iter().any(|m| m.id == "gpt-5.1-codex-max"));
         assert!(models.iter().any(|m| m.id == "codex/gpt-4.1"));
         assert!(models.iter().any(|m| m.id == "codex/o4-mini"));
     }
@@ -3572,7 +3714,14 @@ mod tests {
     fn test_codex_aliases() {
         let catalog = ModelCatalog::new();
         let entry = catalog.find_model("codex").unwrap();
-        assert_eq!(entry.id, "codex/gpt-4.1");
+        assert_eq!(entry.id, "gpt-5.3-codex");
+        assert_eq!(catalog.find_model("codex-5.2").unwrap().id, "gpt-5.2-codex");
+        assert_eq!(
+            catalog.find_model("codex-max").unwrap().id,
+            "gpt-5.1-codex-max"
+        );
+        assert_eq!(catalog.find_model("codex-4.1").unwrap().id, "codex/gpt-4.1");
+        assert_eq!(catalog.find_model("codex-o4").unwrap().id, "codex/o4-mini");
     }
 
     #[test]
@@ -3598,5 +3747,46 @@ mod tests {
         let catalog = ModelCatalog::new();
         let entry = catalog.find_model("claude-code").unwrap();
         assert_eq!(entry.id, "claude-code/sonnet");
+    }
+
+    #[test]
+    fn test_codex_cli_provider() {
+        let catalog = ModelCatalog::new();
+        let p = catalog.get_provider("codex-cli").unwrap();
+        assert_eq!(p.display_name, "Codex CLI");
+        assert!(!p.key_required);
+    }
+
+    #[test]
+    fn test_gemini_cli_provider() {
+        let catalog = ModelCatalog::new();
+        let p = catalog.get_provider("gemini-cli").unwrap();
+        assert_eq!(p.display_name, "Gemini CLI");
+        assert!(!p.key_required);
+    }
+
+    #[test]
+    fn test_opencode_cli_provider() {
+        let catalog = ModelCatalog::new();
+        let p = catalog.get_provider("opencode-cli").unwrap();
+        assert_eq!(p.display_name, "OpenCode CLI");
+        assert!(!p.key_required);
+    }
+
+    #[test]
+    fn test_cli_provider_aliases() {
+        let catalog = ModelCatalog::new();
+        assert_eq!(
+            catalog.find_model("codex-cli").unwrap().id,
+            "codex-cli/default"
+        );
+        assert_eq!(
+            catalog.find_model("gemini-cli").unwrap().id,
+            "gemini-cli/default"
+        );
+        assert_eq!(
+            catalog.find_model("opencode-cli").unwrap().id,
+            "opencode-cli/default"
+        );
     }
 }

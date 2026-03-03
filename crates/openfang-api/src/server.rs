@@ -354,8 +354,7 @@ pub async fn build_router(
         )
         .route(
             "/api/hands/{hand_id}/settings",
-            axum::routing::get(routes::get_hand_settings)
-                .put(routes::update_hand_settings),
+            axum::routing::get(routes::get_hand_settings).put(routes::update_hand_settings),
         )
         .route(
             "/api/hands/instances/{id}/pause",
@@ -412,14 +411,8 @@ pub async fn build_router(
             "/api/comms/events/stream",
             axum::routing::get(routes::comms_events_stream),
         )
-        .route(
-            "/api/comms/send",
-            axum::routing::post(routes::comms_send),
-        )
-        .route(
-            "/api/comms/task",
-            axum::routing::post(routes::comms_task),
-        )
+        .route("/api/comms/send", axum::routing::post(routes::comms_send))
+        .route("/api/comms/task", axum::routing::post(routes::comms_task))
         // Tools endpoint
         .route("/api/tools", axum::routing::get(routes::list_tools))
         // Config endpoints
@@ -464,8 +457,7 @@ pub async fn build_router(
         )
         .route(
             "/api/budget/agents/{id}",
-            axum::routing::get(routes::agent_budget_status)
-                .put(routes::update_agent_budget),
+            axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
         )
         // Session endpoints
         .route("/api/sessions", axum::routing::get(routes::list_sessions))

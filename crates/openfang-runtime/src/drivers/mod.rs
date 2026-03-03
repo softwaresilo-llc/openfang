@@ -6,10 +6,13 @@
 
 pub mod anthropic;
 pub mod claude_code;
+pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
 pub mod gemini;
+pub mod gemini_cli;
 pub mod openai;
+pub mod opencode_cli;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use openfang_types::model_catalog::{
@@ -144,6 +147,21 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             api_key_env: "",
             key_required: false,
         }),
+        "codex-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "gemini-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "opencode-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
         "moonshot" | "kimi" => Some(ProviderDefaults {
             base_url: MOONSHOT_BASE_URL,
             api_key_env: "MOONSHOT_API_KEY",
@@ -272,9 +290,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .or_else(crate::model_catalog::read_codex_credential)
             .ok_or_else(|| {
-                LlmError::MissingApiKey(
-                    "Set OPENAI_API_KEY or install Codex CLI".to_string(),
-                )
+                LlmError::MissingApiKey("Set OPENAI_API_KEY or install Codex CLI".to_string())
             })?;
         let base_url = config
             .base_url
@@ -287,6 +303,24 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
     if provider == "claude-code" {
         let cli_path = config.base_url.clone();
         return Ok(Arc::new(claude_code::ClaudeCodeDriver::new(cli_path)));
+    }
+
+    // Codex CLI — subprocess-based, no API key required.
+    if provider == "codex-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(codex_cli::CodexCliDriver::new(cli_path)));
+    }
+
+    // Gemini CLI — subprocess-based, no API key required.
+    if provider == "gemini-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(gemini_cli::GeminiCliDriver::new(cli_path)));
+    }
+
+    // OpenCode CLI — subprocess-based, no API key required.
+    if provider == "opencode-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(opencode_cli::OpenCodeCliDriver::new(cli_path)));
     }
 
     // GitHub Copilot — wraps OpenAI-compatible driver with automatic token exchange.
@@ -350,7 +384,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             venice, codex, claude-code. Or set base_url for a custom OpenAI-compatible endpoint.",
+             venice, codex, claude-code, codex-cli, gemini-cli, opencode-cli. Or set base_url \
+             for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -390,6 +425,9 @@ pub fn known_providers() -> &'static [&'static str] {
         "venice",
         "codex",
         "claude-code",
+        "codex-cli",
+        "gemini-cli",
+        "opencode-cli",
     ]
 }
 
@@ -486,7 +524,10 @@ mod tests {
         assert!(providers.contains(&"volcengine"));
         assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 31);
+        assert!(providers.contains(&"codex-cli"));
+        assert!(providers.contains(&"gemini-cli"));
+        assert!(providers.contains(&"opencode-cli"));
+        assert_eq!(providers.len(), 34);
     }
 
     #[test]

@@ -167,7 +167,10 @@ impl MarketplaceClient {
 
 /// Build a GitHub search URL with proper query encoding.
 fn build_search_url(config: &MarketplaceConfig, query: &str) -> Result<reqwest::Url, SkillError> {
-    let base = format!("{}/search/repositories", config.registry_url.trim_end_matches('/'));
+    let base = format!(
+        "{}/search/repositories",
+        config.registry_url.trim_end_matches('/')
+    );
     let mut url = reqwest::Url::parse(&base)
         .map_err(|e| SkillError::Network(format!("Invalid registry URL '{base}': {e}")))?;
     let search = format!("{query} org:{}", config.github_org);

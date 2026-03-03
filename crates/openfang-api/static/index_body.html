@@ -1987,6 +1987,36 @@
                       Have a Meta Business account? <button class="btn-link" @click="showBusinessApi = true" style="font-size:inherit;text-decoration:underline;cursor:pointer;background:none;border:none;color:var(--accent,#818cf8);padding:0">Use Business API instead</button>
                     </div>
 
+                    <!-- QR: Voice advanced config -->
+                    <template x-if="hasWhatsappVoiceFields()">
+                      <div x-show="!qr.loading" class="mt-4" style="border-top:1px solid var(--border,#2a2a3a);padding-top:12px">
+                        <button class="btn btn-ghost btn-sm mb-2" @click="showAdvanced = !showAdvanced"
+                                x-text="showAdvanced ? 'Hide AdvancedConfig' : 'AdvancedConfig (' + whatsappVoiceFields().length + ')'"></button>
+                        <template x-if="showAdvanced">
+                          <div>
+                            <template x-for="f in whatsappVoiceFields()" :key="f.key">
+                              <div style="margin-bottom:0.75rem">
+                                <label class="text-sm text-dim" style="display:block;margin-bottom:0.25rem" x-text="f.label"></label>
+                                <template x-if="f.type === 'number'">
+                                  <input class="form-input" type="number"
+                                         x-model="formValues[f.key]"
+                                         :placeholder="f.placeholder">
+                                </template>
+                                <template x-if="f.type === 'text' || f.type === 'list'">
+                                  <input class="form-input" type="text"
+                                         x-model="formValues[f.key]"
+                                         :placeholder="f.type === 'list' ? f.placeholder + ' (comma-separated)' : f.placeholder">
+                                </template>
+                              </div>
+                            </template>
+                            <button class="btn btn-primary btn-sm" @click="saveWhatsappVoiceConfig()" :disabled="configuring"
+                                    x-text="configuring ? 'Saving...' : 'Save AdvancedConfig'">
+                            </button>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
+
                     <!-- Action buttons for QR mode -->
                     <div class="flex gap-2 mt-4" style="flex-wrap:wrap;justify-content:center" x-show="!qr.loading">
                       <button class="btn btn-ghost" x-show="qr.available && !qr.connected && !qr.expired" @click="startQR()">Refresh QR</button>

@@ -4,7 +4,9 @@
 //! `start_channel_bridge()` entry point called by the daemon.
 
 use dashmap::DashMap;
-use openfang_channels::bridge::{BridgeManager, ChannelBridgeHandle, ConversationState};
+use openfang_channels::bridge::{
+    BridgeManager, ChannelBridgeHandle, ConversationState, VoiceAsset,
+};
 use openfang_channels::discord::DiscordAdapter;
 use openfang_channels::email::EmailAdapter;
 use openfang_channels::google_chat::GoogleChatAdapter;
@@ -53,7 +55,7 @@ use openfang_channels::ntfy::NtfyAdapter;
 use openfang_channels::webhook::WebhookAdapter;
 use openfang_kernel::OpenFangKernel;
 use openfang_types::agent::{AgentId, SessionId};
-use openfang_types::config::ChatRoomsConfig;
+use openfang_types::config::{ChatRoomsConfig, VoiceLanguage};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -66,17 +68,40 @@ pub struct KernelBridgeAdapter {
     agent_session_locks: DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
 }
 
-const CHAT_ROOM_STATES_KEY: &str = "__openfang_chat_room_states_v1";
+fn tts_format_to_content_type(format: &str) -> &'static str {
+    match format {
+        "wav" => "audio/wav",
+        "ogg" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "aac" => "audio/aac",
+        "m4a" | "mp4" => "audio/mp4",
+        _ => "audio/mpeg",
+    }
+}
+
+fn local_api_base_url(api_listen: &str) -> String {
+    // Force a loopback host for local gateway fetches.
+    // If parsing fails, use the OpenFang default.
+    if let Some((_, port)) = api_listen.rsplit_once(':') {
+        let port = port.trim();
+        if !port.is_empty() {
+            return format!("http://127.0.0.1:{port}");
+        }
+    }
+    "http://127.0.0.1:4200".to_string()
+}
+
+pub(crate) const CHAT_ROOM_STATES_KEY: &str = "__openfang_chat_room_states_v1";
 const CHAT_ROOM_SESSION_MAP_KEY: &str = "__openfang_chat_room_sessions_v1";
 
-fn chat_rooms_shared_agent_id() -> AgentId {
+pub(crate) fn chat_rooms_shared_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x02,
     ]))
 }
 
-fn load_room_states(kernel: &OpenFangKernel) -> HashMap<String, ConversationState> {
+pub(crate) fn load_room_states(kernel: &OpenFangKernel) -> HashMap<String, ConversationState> {
     let shared_id = chat_rooms_shared_agent_id();
     match kernel
         .memory
@@ -87,7 +112,7 @@ fn load_room_states(kernel: &OpenFangKernel) -> HashMap<String, ConversationStat
     }
 }
 
-fn save_room_states(
+pub(crate) fn save_room_states(
     kernel: &OpenFangKernel,
     states: &HashMap<String, ConversationState>,
 ) -> Result<(), String> {
@@ -125,6 +150,23 @@ fn save_room_session_map(
 
 fn room_session_key(conversation_key: &str, agent_id: AgentId) -> String {
     format!("{conversation_key}|{}", agent_id)
+}
+
+pub(crate) fn remove_room_state(
+    kernel: &OpenFangKernel,
+    conversation_key: &str,
+) -> Result<bool, String> {
+    let mut states = load_room_states(kernel);
+    let existed = states.remove(conversation_key).is_some();
+    if existed {
+        save_room_states(kernel, &states)?;
+    }
+
+    let mut session_map = load_room_session_map(kernel);
+    let prefix = format!("{conversation_key}|");
+    session_map.retain(|k, _| !k.starts_with(&prefix));
+    save_room_session_map(kernel, &session_map)?;
+    Ok(existed)
 }
 
 #[async_trait]
@@ -213,10 +255,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(states.get(conversation_key).cloned())
     }
 
+    async fn list_conversation_states(&self) -> Result<Vec<ConversationState>, String> {
+        let mut values: Vec<ConversationState> = load_room_states(self.kernel.as_ref())
+            .into_values()
+            .collect();
+        values.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        Ok(values)
+    }
+
     async fn save_conversation_state(&self, state: ConversationState) -> Result<(), String> {
         let mut states = load_room_states(self.kernel.as_ref());
         states.insert(state.conversation_key.clone(), state);
         save_room_states(self.kernel.as_ref(), &states)
+    }
+
+    async fn delete_conversation_state(&self, conversation_key: &str) -> Result<(), String> {
+        let _ = remove_room_state(self.kernel.as_ref(), conversation_key)?;
+        Ok(())
     }
 
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
@@ -877,6 +932,129 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "linkedin" => channels.linkedin.as_ref().map(|c| c.overrides.clone()),
             _ => None,
         }
+    }
+
+    async fn channel_voice_config(
+        &self,
+        channel_type: &str,
+    ) -> Option<openfang_types::config::ChannelVoiceConfig> {
+        match channel_type {
+            "whatsapp" => self
+                .kernel
+                .config
+                .channels
+                .whatsapp
+                .as_ref()
+                .map(|c| c.voice.clone()),
+            _ => None,
+        }
+    }
+
+    async fn transcribe_voice_url(
+        &self,
+        _channel_type: &str,
+        media_url: &str,
+    ) -> Result<Option<String>, String> {
+        let response = reqwest::get(media_url)
+            .await
+            .map_err(|e| format!("Failed to download voice media: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "Voice media download failed with status {}",
+                response.status()
+            ));
+        }
+
+        let mime = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap_or(v).trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "audio/ogg".to_string());
+
+        if !mime.starts_with("audio/") {
+            return Err(format!("Unsupported voice media content type: {mime}"));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed reading voice media bytes: {e}"))?;
+        if bytes.is_empty() {
+            return Err("Voice media is empty".to_string());
+        }
+
+        use base64::Engine;
+        let attachment = openfang_types::media::MediaAttachment {
+            media_type: openfang_types::media::MediaType::Audio,
+            mime_type: mime.clone(),
+            source: openfang_types::media::MediaSource::Base64 {
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+                mime_type: mime,
+            },
+            size_bytes: bytes.len() as u64,
+        };
+
+        let result = self
+            .kernel
+            .media_engine
+            .transcribe_audio(&attachment)
+            .await
+            .map_err(|e| format!("Voice transcription failed: {e}"))?;
+        Ok(Some(result.description))
+    }
+
+    async fn synthesize_voice(
+        &self,
+        channel_type: &str,
+        text: &str,
+        language: VoiceLanguage,
+    ) -> Result<Option<VoiceAsset>, String> {
+        if !self.kernel.config.tts.enabled {
+            return Ok(None);
+        }
+
+        let provider_override = if channel_type.eq_ignore_ascii_case("whatsapp") {
+            self.kernel
+                .config
+                .channels
+                .whatsapp
+                .as_ref()
+                .and_then(|cfg| cfg.voice.tts_provider.as_provider_override())
+        } else {
+            None
+        };
+
+        let local_voice_override = if provider_override == Some("local") {
+            Some(match language {
+                VoiceLanguage::De => "de-DE-KatjaNeural",
+                VoiceLanguage::En => "en-US-AriaNeural",
+            })
+        } else {
+            None
+        };
+
+        let synthesized = self
+            .kernel
+            .tts_engine
+            .synthesize_with_provider(provider_override, text, local_voice_override, None)
+            .await
+            .map_err(|e| format!("Voice synthesis failed: {e}"))?;
+
+        let content_type = tts_format_to_content_type(&synthesized.format);
+        let filename = format!("channel_voice.{}", synthesized.format);
+        let file_id =
+            crate::routes::persist_upload_blob(&filename, content_type, &synthesized.audio_data)?;
+        let base_url = local_api_base_url(&self.kernel.config.api_listen);
+        let duration_seconds = ((synthesized.duration_estimate_ms as f64) / 1000.0)
+            .ceil()
+            .max(1.0) as u32;
+
+        Ok(Some(VoiceAsset {
+            url: format!("{base_url}/api/uploads/{file_id}"),
+            duration_seconds,
+        }))
     }
 
     async fn authorize_channel_user(

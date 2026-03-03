@@ -1260,6 +1260,11 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         quick_setup: "Scan QR code with your phone — no developer account needed",
         setup_type: "qr",
         fields: &[
+            // Voice behavior (applies to gateway + cloud mode)
+            ChannelField { key: "voice.reply_mode", label: "Voice Reply Mode", field_type: FieldType::Text, env_var: None, required: false, placeholder: "off | auto | always", advanced: true },
+            ChannelField { key: "voice.default_language", label: "Voice Default Language", field_type: FieldType::Text, env_var: None, required: false, placeholder: "de | en", advanced: true },
+            ChannelField { key: "voice.auto_min_text_length", label: "Voice Auto Min Text Length", field_type: FieldType::Number, env_var: None, required: false, placeholder: "48", advanced: true },
+            ChannelField { key: "voice.auto_keywords", label: "Voice Auto Keywords", field_type: FieldType::List, env_var: None, required: false, placeholder: "voice, audio, sprachnachricht", advanced: true },
             // Business API fallback fields — all advanced (hidden behind "Use Business API" toggle)
             ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_ACCESS_TOKEN"), required: false, placeholder: "EAAx...", advanced: true },
             ChannelField { key: "phone_number_id", label: "Phone Number ID", field_type: FieldType::Text, env_var: None, required: false, placeholder: "1234567890", advanced: true },
@@ -1268,7 +1273,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
         ],
         setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
-        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"",
+        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"\n\n[channels.whatsapp.voice]\nreply_mode = \"off\"\ndefault_language = \"de\"",
     },
     ChannelMeta {
         name: "signal", display_name: "Signal", icon: "SG",
@@ -2183,13 +2188,14 @@ pub async fn configure_channel(
     let home = openfang_kernel::config::openfang_home();
     let secrets_path = home.join("secrets.env");
     let config_path = home.join("config.toml");
-    let mut config_fields: HashMap<String, (String, FieldType)> = HashMap::new();
+    let mut config_fields: HashMap<String, toml::Value> = HashMap::new();
 
     for field_def in meta.fields {
         let value = fields
             .get(field_def.key)
             .and_then(|v| v.as_str())
             .unwrap_or("");
+        let value = value.trim();
         if value.is_empty() {
             continue;
         }
@@ -2210,11 +2216,36 @@ pub async fn configure_channel(
             // is not empty and the kernel knows which env var to read.
             config_fields.insert(
                 field_def.key.to_string(),
-                (env_var.to_string(), FieldType::Text),
+                toml::Value::String(env_var.to_string()),
             );
         } else {
-            // Config field — collect for TOML write with type info
-            config_fields.insert(field_def.key.to_string(), (value.to_string(), field_def.field_type));
+            // Config field — collect for TOML write with typed values.
+            let toml_value = match field_def.field_type {
+                FieldType::Text => toml::Value::String(value.to_string()),
+                FieldType::Number => match value.parse::<i64>() {
+                    Ok(n) => toml::Value::Integer(n),
+                    Err(_) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(serde_json::json!({
+                                "error": format!("Invalid number for field '{}'", field_def.key)
+                            })),
+                        );
+                    }
+                },
+                FieldType::List => {
+                    let items: Vec<toml::Value> = value
+                        .split(',')
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| toml::Value::String(s.to_string()))
+                        .collect();
+                    toml::Value::Array(items)
+                }
+                // Secret fields are handled via environment variables above.
+                FieldType::Secret => toml::Value::String(value.to_string()),
+            };
+            config_fields.insert(field_def.key.to_string(), toml_value);
         }
     }
 
@@ -3218,7 +3249,9 @@ pub async fn clawhub_search(
                 "items": items,
                 "next_cursor": null,
             });
-            state.clawhub_cache.insert(cache_key, (Instant::now(), resp.clone()));
+            state
+                .clawhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
@@ -3232,9 +3265,7 @@ pub async fn clawhub_search(
             };
             (
                 status,
-                Json(
-                    serde_json::json!({"items": [], "next_cursor": null, "error": msg}),
-                ),
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
             )
         }
     }
@@ -3287,7 +3318,9 @@ pub async fn clawhub_browse(
                 "items": items,
                 "next_cursor": results.next_cursor,
             });
-            state.clawhub_cache.insert(cache_key, (Instant::now(), resp.clone()));
+            state
+                .clawhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
             (StatusCode::OK, Json(resp))
         }
         Err(e) => {
@@ -3300,9 +3333,7 @@ pub async fn clawhub_browse(
             };
             (
                 status,
-                Json(
-                    serde_json::json!({"items": [], "next_cursor": null, "error": msg}),
-                ),
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
             )
         }
     }
@@ -3469,7 +3500,10 @@ pub async fn clawhub_install(
                 StatusCode::FORBIDDEN
             } else if msg.contains("429") || msg.contains("rate limit") {
                 StatusCode::TOO_MANY_REQUESTS
-            } else if msg.contains("Network error") || msg.contains("returned 4") || msg.contains("returned 5") {
+            } else if msg.contains("Network error")
+                || msg.contains("returned 4")
+                || msg.contains("returned 5")
+            {
                 StatusCode::BAD_GATEWAY
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -4124,7 +4158,9 @@ pub async fn update_hand_settings(
         },
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("No active instance for hand: {hand_id}. Activate the hand first.")})),
+            Json(
+                serde_json::json!({"error": format!("No active instance for hand: {hand_id}. Activate the hand first.")}),
+            ),
         ),
     }
 }
@@ -4251,7 +4287,10 @@ pub async fn hand_instance_browser(
                 content = data["content"].as_str().unwrap_or("").to_string();
                 // Truncate content to avoid huge payloads (UTF-8 safe)
                 if content.len() > 2000 {
-                    content = format!("{}... (truncated)", openfang_types::truncate_str(&content, 2000));
+                    content = format!(
+                        "{}... (truncated)",
+                        openfang_types::truncate_str(&content, 2000)
+                    );
                 }
             }
         }
@@ -4927,7 +4966,9 @@ pub async fn update_agent_budget(
     if hourly.is_none() && daily.is_none() && monthly.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd"})),
+            Json(
+                serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd"}),
+            ),
         );
     }
 
@@ -6253,16 +6294,11 @@ pub async fn clear_agent_history(
         }
     };
     match state.kernel.clear_agent_history(agent_id) {
-        Ok(()) => (
-            StatusCode::NO_CONTENT,
-            Json(serde_json::json!({})),
+        Ok(()) => (StatusCode::NO_CONTENT, Json(serde_json::json!({}))),
+        Err(KernelError::OpenFang(openfang_types::error::OpenFangError::AgentNotFound(_))) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
         ),
-        Err(KernelError::OpenFang(openfang_types::error::OpenFangError::AgentNotFound(_))) => {
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
-            )
-        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -6437,10 +6473,7 @@ pub async fn set_agent_tools(
         .kernel
         .set_agent_tool_filters(agent_id, allowlist, blocklist)
     {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok"})),
-        ),
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -6882,8 +6915,7 @@ pub async fn set_provider_url(
     }
 
     // Probe reachability at the new URL
-    let probe =
-        openfang_runtime::provider_health::probe_provider(&name, &base_url).await;
+    let probe = openfang_runtime::provider_health::probe_provider(&name, &base_url).await;
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
@@ -7090,7 +7122,7 @@ fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(), std::io::E
 fn upsert_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
-    fields: &HashMap<String, (String, FieldType)>,
+    fields: &HashMap<String, toml::Value>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let content = if config_path.exists() {
         std::fs::read_to_string(config_path)?
@@ -7118,32 +7150,15 @@ fn upsert_channel_config(
         .and_then(|v| v.as_table_mut())
         .ok_or("channels is not a table")?;
 
-    // Build channel sub-table with correct TOML types
-    let mut ch_table = toml::map::Map::new();
-    for (k, (v, ft)) in fields {
-        let toml_val = match ft {
-            FieldType::Number => {
-                if let Ok(n) = v.parse::<i64>() {
-                    toml::Value::Integer(n)
-                } else {
-                    toml::Value::String(v.clone())
-                }
-            }
-            FieldType::List => {
-                // Always store list items as strings so that numeric IDs
-                // (e.g. Discord guild snowflakes, Telegram user IDs) are
-                // deserialized correctly into Vec<String> config fields.
-                let items: Vec<toml::Value> = v
-                    .split(',')
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| toml::Value::String(s.to_string()))
-                    .collect();
-                toml::Value::Array(items)
-            }
-            _ => toml::Value::String(v.clone()),
-        };
-        ch_table.insert(k.clone(), toml_val);
+    // Reuse existing channel table and update only provided keys.
+    let mut ch_table = channels_table
+        .get(channel_name)
+        .and_then(|v| v.as_table())
+        .cloned()
+        .unwrap_or_default();
+
+    for (k, v) in fields {
+        set_nested_toml_value(&mut ch_table, k, v.clone())?;
     }
     channels_table.insert(channel_name.to_string(), toml::Value::Table(ch_table));
 
@@ -7153,6 +7168,40 @@ fn upsert_channel_config(
     }
 
     std::fs::write(config_path, toml::to_string_pretty(&doc)?)?;
+    Ok(())
+}
+
+/// Set a TOML value into a possibly nested table by dotted key path.
+fn set_nested_toml_value(
+    table: &mut toml::map::Map<String, toml::Value>,
+    dotted_key: &str,
+    value: toml::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let parts: Vec<&str> = dotted_key.split('.').filter(|p| !p.is_empty()).collect();
+    if parts.is_empty() {
+        return Err("Empty config key".into());
+    }
+    if parts.len() == 1 {
+        table.insert(parts[0].to_string(), value);
+        return Ok(());
+    }
+
+    let mut current = table;
+    for part in &parts[..parts.len() - 1] {
+        if !current.contains_key(*part) {
+            current.insert(
+                (*part).to_string(),
+                toml::Value::Table(toml::map::Map::new()),
+            );
+        }
+        let next = current
+            .get_mut(*part)
+            .and_then(|v| v.as_table_mut())
+            .ok_or_else(|| format!("Config key '{}' is not a table", part))?;
+        current = next;
+    }
+
+    current.insert(parts[parts.len() - 1].to_string(), value);
     Ok(())
 }
 
@@ -7777,7 +7826,11 @@ pub async fn run_schedule(
     );
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state.kernel.send_message_with_handle(target_agent, &run_message, Some(kernel_handle)).await {
+    match state
+        .kernel
+        .send_message_with_handle(target_agent, &run_message, Some(kernel_handle))
+        .await
+    {
         Ok(result) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -7931,7 +7984,9 @@ pub async fn patch_agent_config(
         if name.len() > MAX_NAME_LEN {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": format!("Name exceeds max length ({MAX_NAME_LEN} chars)")})),
+                Json(
+                    serde_json::json!({"error": format!("Name exceeds max length ({MAX_NAME_LEN} chars)")}),
+                ),
             );
         }
     }
@@ -7939,7 +7994,9 @@ pub async fn patch_agent_config(
         if desc.len() > MAX_DESC_LEN {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": format!("Description exceeds max length ({MAX_DESC_LEN} chars)")})),
+                Json(
+                    serde_json::json!({"error": format!("Description exceeds max length ({MAX_DESC_LEN} chars)")}),
+                ),
             );
         }
     }
@@ -7947,7 +8004,9 @@ pub async fn patch_agent_config(
         if prompt.len() > MAX_PROMPT_LEN {
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
-                Json(serde_json::json!({"error": format!("System prompt exceeds max length ({MAX_PROMPT_LEN} chars)")})),
+                Json(
+                    serde_json::json!({"error": format!("System prompt exceeds max length ({MAX_PROMPT_LEN} chars)")}),
+                ),
             );
         }
     }
@@ -8547,6 +8606,32 @@ fn is_allowed_content_type(ct: &str) -> bool {
         .any(|prefix| ct.starts_with(prefix))
 }
 
+/// Persist a blob in the upload store and register metadata.
+///
+/// Returns the generated `file_id` on success.
+pub(crate) fn persist_upload_blob(
+    filename: &str,
+    content_type: &str,
+    data: &[u8],
+) -> Result<String, String> {
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let upload_dir = std::env::temp_dir().join("openfang_uploads");
+    std::fs::create_dir_all(&upload_dir)
+        .map_err(|e| format!("Failed to create upload dir: {e}"))?;
+
+    let file_path = upload_dir.join(&file_id);
+    std::fs::write(&file_path, data).map_err(|e| format!("Failed to save file: {e}"))?;
+
+    UPLOAD_REGISTRY.insert(
+        file_id.clone(),
+        UploadMeta {
+            filename: filename.to_string(),
+            content_type: content_type.to_string(),
+        },
+    );
+    Ok(file_id)
+}
+
 /// POST /api/agents/{id}/upload — Upload a file attachment.
 ///
 /// Accepts raw body bytes. The client must set:
@@ -8609,34 +8694,20 @@ pub async fn upload_file(
         );
     }
 
-    // Generate file ID and save
-    let file_id = uuid::Uuid::new_v4().to_string();
-    let upload_dir = std::env::temp_dir().join("openfang_uploads");
-    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
-        tracing::warn!("Failed to create upload dir: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Failed to create upload directory"})),
-        );
-    }
+    let file_id = match persist_upload_blob(&filename, &content_type, &body) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::warn!("Failed to persist upload: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to save file"})),
+            );
+        }
+    };
 
-    let file_path = upload_dir.join(&file_id);
-    if let Err(e) = std::fs::write(&file_path, &body) {
-        tracing::warn!("Failed to write upload: {e}");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Failed to save file"})),
-        );
-    }
+    let file_path = std::env::temp_dir().join("openfang_uploads").join(&file_id);
 
     let size = body.len();
-    UPLOAD_REGISTRY.insert(
-        file_id.clone(),
-        UploadMeta {
-            filename: filename.clone(),
-            content_type: content_type.clone(),
-        },
-    );
 
     // Auto-transcribe audio uploads using the media engine
     let transcription = if content_type.starts_with("audio/") {
@@ -8939,12 +9010,18 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 
 /// GET /api/config/schema — Return a simplified JSON description of the config structure.
-pub async fn config_schema(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Build provider/model options from model catalog for dropdowns
-    let catalog = state.kernel.model_catalog.read().unwrap_or_else(|e| e.into_inner());
-    let provider_options: Vec<String> = catalog.list_providers().iter().map(|p| p.id.clone()).collect();
+    let catalog = state
+        .kernel
+        .model_catalog
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let provider_options: Vec<String> = catalog
+        .list_providers()
+        .iter()
+        .map(|p| p.id.clone())
+        .collect();
     let model_options: Vec<serde_json::Value> = catalog
         .list_models()
         .iter()
@@ -9984,8 +10061,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
                 CopilotFlowState {
                     device_code: resp.device_code,
                     interval: resp.interval,
-                    expires_at: Instant::now()
-                        + std::time::Duration::from_secs(resp.expires_in),
+                    expires_at: Instant::now() + std::time::Duration::from_secs(resp.expires_in),
                 },
             );
 
@@ -10049,7 +10125,9 @@ pub async fn copilot_oauth_poll(
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")})),
+                    Json(
+                        serde_json::json!({"status": "error", "error": format!("Failed to save token: {e}")}),
+                    ),
                 );
             }
 
@@ -10253,15 +10331,30 @@ fn audit_to_comms_event(
             // Format detail: "tokens_in=X, tokens_out=Y" → readable summary
             let detail = if entry.detail.starts_with("tokens_in=") {
                 let parts: Vec<&str> = entry.detail.split(", ").collect();
-                let in_tok = parts.first().and_then(|p| p.strip_prefix("tokens_in=")).unwrap_or("?");
-                let out_tok = parts.get(1).and_then(|p| p.strip_prefix("tokens_out=")).unwrap_or("?");
+                let in_tok = parts
+                    .first()
+                    .and_then(|p| p.strip_prefix("tokens_in="))
+                    .unwrap_or("?");
+                let out_tok = parts
+                    .get(1)
+                    .and_then(|p| p.strip_prefix("tokens_out="))
+                    .unwrap_or("?");
                 if entry.outcome == "ok" {
                     format!("{} in / {} out tokens", in_tok, out_tok)
                 } else {
-                    format!("{} in / {} out — {}", in_tok, out_tok, openfang_types::truncate_str(&entry.outcome, 80))
+                    format!(
+                        "{} in / {} out — {}",
+                        in_tok,
+                        out_tok,
+                        openfang_types::truncate_str(&entry.outcome, 80)
+                    )
                 }
             } else if entry.outcome != "ok" {
-                format!("{} — {}", openfang_types::truncate_str(&entry.detail, 80), openfang_types::truncate_str(&entry.outcome, 80))
+                format!(
+                    "{} — {}",
+                    openfang_types::truncate_str(&entry.detail, 80),
+                    openfang_types::truncate_str(&entry.outcome, 80)
+                )
             } else {
                 openfang_types::truncate_str(&entry.detail, 200).to_string()
             };
@@ -10269,12 +10362,18 @@ fn audit_to_comms_event(
         }
         "AgentSpawn" => (
             CommsEventKind::AgentSpawned,
-            format!("Agent spawned: {}", openfang_types::truncate_str(&entry.detail, 100)),
+            format!(
+                "Agent spawned: {}",
+                openfang_types::truncate_str(&entry.detail, 100)
+            ),
             "",
         ),
         "AgentKill" => (
             CommsEventKind::AgentTerminated,
-            format!("Agent killed: {}", openfang_types::truncate_str(&entry.detail, 100)),
+            format!(
+                "Agent killed: {}",
+                openfang_types::truncate_str(&entry.detail, 100)
+            ),
             "",
         ),
         _ => return None,
@@ -10286,8 +10385,16 @@ fn audit_to_comms_event(
         kind,
         source_id: entry.agent_id.clone(),
         source_name: resolve_name(&entry.agent_id),
-        target_id: if target_label.is_empty() { String::new() } else { target_label.to_string() },
-        target_name: if target_label.is_empty() { String::new() } else { target_label.to_string() },
+        target_id: if target_label.is_empty() {
+            String::new()
+        } else {
+            target_label.to_string()
+        },
+        target_name: if target_label.is_empty() {
+            String::new()
+        } else {
+            target_label.to_string()
+        },
         detail,
     })
 }
@@ -10338,9 +10445,7 @@ pub async fn comms_events(
 /// GET /api/comms/events/stream — SSE stream of inter-agent communication events.
 ///
 /// Polls the audit log every 500ms for new inter-agent events.
-pub async fn comms_events_stream(
-    State(state): State<Arc<AppState>>,
-) -> axum::response::Response {
+pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
     let (tx, rx) = tokio::sync::mpsc::channel::<

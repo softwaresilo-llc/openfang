@@ -6,13 +6,46 @@
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
 use async_trait::async_trait;
 use futures::Stream;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
+use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 use zeroize::Zeroizing;
 
 const MAX_MESSAGE_LEN: usize = 4096;
+const GATEWAY_POLL_TIMEOUT_MS: u64 = 25_000;
+
+#[derive(Debug, Deserialize)]
+struct GatewayPollEnvelope {
+    event: Option<GatewayInboundEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayInboundEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    message_id: String,
+    #[serde(default)]
+    chat_jid: String,
+    #[serde(default)]
+    sender_phone: String,
+    #[serde(default)]
+    sender_name: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    voice_url: Option<String>,
+    #[serde(default)]
+    duration_seconds: Option<u32>,
+    #[serde(default)]
+    is_group: bool,
+    #[serde(default)]
+    timestamp: Option<i64>,
+}
 
 /// WhatsApp Cloud API adapter.
 ///
@@ -114,6 +147,42 @@ impl WhatsAppAdapter {
         Ok(())
     }
 
+    /// Send a voice/audio message via WhatsApp Cloud API.
+    async fn api_send_voice(
+        &self,
+        to: &str,
+        voice_url: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "https://graph.facebook.com/v21.0/{}/messages",
+            self.phone_number_id
+        );
+
+        let body = serde_json::json!({
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "audio",
+            "audio": { "link": voice_url }
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&*self.access_token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!("WhatsApp API voice error {status}: {body}");
+            return Err(format!("WhatsApp API voice error {status}: {body}").into());
+        }
+
+        Ok(())
+    }
+
     /// Mark a message as read.
     #[allow(dead_code)]
     async fn api_mark_read(&self, message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -161,6 +230,140 @@ impl WhatsAppAdapter {
         Ok(())
     }
 
+    /// Send a voice message through the WhatsApp Web gateway.
+    async fn gateway_send_voice(
+        &self,
+        gateway_url: &str,
+        to: &str,
+        voice_url: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!("{}/message/send_voice", gateway_url.trim_end_matches('/'));
+        let body = serde_json::json!({
+            "to": to,
+            "voice_url": voice_url,
+            "ptt": true
+        });
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!("WhatsApp gateway voice error {status}: {body}");
+            return Err(format!("WhatsApp gateway voice error {status}: {body}").into());
+        }
+        Ok(())
+    }
+
+    fn is_allowed_user(allowed_users: &[String], phone: &str, chat_jid: &str) -> bool {
+        if allowed_users.is_empty() {
+            return true;
+        }
+        allowed_users
+            .iter()
+            .any(|u| u == phone || (!chat_jid.is_empty() && u == chat_jid))
+    }
+
+    async fn gateway_poll_event(
+        client: &reqwest::Client,
+        gateway_url: &str,
+        allowed_users: &[String],
+    ) -> Result<Option<ChannelMessage>, String> {
+        let url = format!(
+            "{}/events/poll?timeout_ms={}",
+            gateway_url.trim_end_matches('/'),
+            GATEWAY_POLL_TIMEOUT_MS
+        );
+
+        let resp = client
+            .get(&url)
+            .timeout(Duration::from_millis(GATEWAY_POLL_TIMEOUT_MS + 5_000))
+            .send()
+            .await
+            .map_err(|e| format!("Gateway poll request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("Gateway poll failed ({status}): {body}"));
+        }
+
+        let envelope: GatewayPollEnvelope = resp
+            .json()
+            .await
+            .map_err(|e| format!("Gateway poll JSON parse failed: {e}"))?;
+        let Some(event) = envelope.event else {
+            return Ok(None);
+        };
+
+        let platform_id = if event.sender_phone.is_empty() {
+            event.chat_jid.clone()
+        } else {
+            event.sender_phone.clone()
+        };
+        if platform_id.is_empty() {
+            return Ok(None);
+        }
+
+        if !Self::is_allowed_user(allowed_users, &platform_id, &event.chat_jid) {
+            return Ok(None);
+        }
+
+        let display_name = if event.sender_name.is_empty() {
+            platform_id.clone()
+        } else {
+            event.sender_name
+        };
+
+        let content = match event.event_type.as_str() {
+            "voice" => {
+                let Some(voice_url) = event.voice_url else {
+                    return Ok(None);
+                };
+                ChannelContent::Voice {
+                    url: voice_url,
+                    duration_seconds: event.duration_seconds.unwrap_or(0),
+                }
+            }
+            _ => {
+                if event.text.trim().is_empty() {
+                    return Ok(None);
+                }
+                ChannelContent::Text(event.text)
+            }
+        };
+
+        let timestamp = event
+            .timestamp
+            .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+            .unwrap_or_else(chrono::Utc::now);
+        let message_id = if event.message_id.is_empty() {
+            format!("gw-{}", timestamp.timestamp_millis())
+        } else {
+            event.message_id
+        };
+        let mut metadata = HashMap::new();
+        if !event.chat_jid.is_empty() {
+            metadata.insert("chat_jid".to_string(), serde_json::json!(event.chat_jid));
+        }
+        metadata.insert("source".to_string(), serde_json::json!("whatsapp_gateway"));
+
+        Ok(Some(ChannelMessage {
+            channel: ChannelType::WhatsApp,
+            platform_message_id: message_id,
+            sender: ChannelUser {
+                platform_id,
+                display_name,
+                openfang_user: None,
+            },
+            content,
+            target_agent: None,
+            timestamp,
+            is_group: event.is_group,
+            thread_id: None,
+            metadata,
+        }))
+    }
+
     /// Check if a phone number is allowed.
     #[allow(dead_code)]
     fn is_allowed(&self, phone: &str) -> bool {
@@ -188,7 +391,48 @@ impl ChannelAdapter for WhatsAppAdapter {
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
     {
-        let (_tx, rx) = mpsc::channel::<ChannelMessage>(256);
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
+
+        // Web/QR gateway mode — poll inbound events from the gateway.
+        if let Some(gateway_url) = self.gateway_url.clone() {
+            let client = self.client.clone();
+            let allowed_users = self.allowed_users.clone();
+            let mut shutdown_rx = self.shutdown_rx.clone();
+
+            info!("Starting WhatsApp gateway poller at {gateway_url}");
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown_rx.changed() => {
+                            if *shutdown_rx.borrow() {
+                                info!("WhatsApp gateway poller stopped");
+                                break;
+                            }
+                        }
+                        polled = Self::gateway_poll_event(&client, &gateway_url, &allowed_users) => {
+                            match polled {
+                                Ok(Some(message)) => {
+                                    if tx.send(message).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => {
+                                    // No event in this poll cycle.
+                                }
+                                Err(e) => {
+                                    error!("WhatsApp gateway poll error: {e}");
+                                    sleep(Duration::from_secs(2)).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            return Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)));
+        }
+
+        // Cloud API mode (webhook placeholder)
         let port = self.webhook_port;
         let _verify_token = self.verify_token.clone();
         let _allowed_users = self.allowed_users.clone();
@@ -199,9 +443,6 @@ impl ChannelAdapter for WhatsAppAdapter {
         info!("Starting WhatsApp webhook listener on port {port}");
 
         tokio::spawn(async move {
-            // Simple webhook polling simulation
-            // In production, this would be an axum HTTP server handling webhook POSTs
-            // For now, log that the webhook is ready
             info!("WhatsApp webhook ready on port {port} (verify_token configured)");
             info!("Configure your webhook URL: https://your-domain:{port}/webhook");
 
@@ -220,23 +461,38 @@ impl ChannelAdapter for WhatsAppAdapter {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Web/QR gateway mode: route all messages through the gateway
         if let Some(ref gw) = self.gateway_url {
-            let text = match &content {
-                ChannelContent::Text(t) => t.clone(),
+            match &content {
+                ChannelContent::Text(t) => {
+                    // Split long messages the same way as Cloud API mode
+                    let chunks = crate::types::split_message(t, MAX_MESSAGE_LEN);
+                    for chunk in chunks {
+                        self.gateway_send_message(gw, &user.platform_id, chunk)
+                            .await?;
+                    }
+                }
+                ChannelContent::Voice { url, .. } => {
+                    self.gateway_send_voice(gw, &user.platform_id, url).await?;
+                }
                 ChannelContent::Image { caption, .. } => {
-                    caption
+                    let text = caption
                         .clone()
-                        .unwrap_or_else(|| "(Image — not supported in Web mode)".to_string())
+                        .unwrap_or_else(|| "(Image — not supported in Web mode)".to_string());
+                    self.gateway_send_message(gw, &user.platform_id, &text)
+                        .await?;
                 }
                 ChannelContent::File { filename, .. } => {
-                    format!("(File: {filename} — not supported in Web mode)")
+                    let text = format!("(File: {filename} — not supported in Web mode)");
+                    self.gateway_send_message(gw, &user.platform_id, &text)
+                        .await?;
                 }
-                _ => "(Unsupported content type in Web mode)".to_string(),
-            };
-            // Split long messages the same way as Cloud API mode
-            let chunks = crate::types::split_message(&text, MAX_MESSAGE_LEN);
-            for chunk in chunks {
-                self.gateway_send_message(gw, &user.platform_id, chunk)
+                _ => {
+                    self.gateway_send_message(
+                        gw,
+                        &user.platform_id,
+                        "(Unsupported content type in Web mode)",
+                    )
                     .await?;
+                }
             }
             return Ok(());
         }
@@ -308,6 +564,9 @@ impl ChannelAdapter for WhatsAppAdapter {
                     .json(&body)
                     .send()
                     .await?;
+            }
+            ChannelContent::Voice { url, .. } => {
+                self.api_send_voice(&user.platform_id, &url).await?;
             }
             _ => {
                 self.api_send_message(&user.platform_id, "(Unsupported content type)")
