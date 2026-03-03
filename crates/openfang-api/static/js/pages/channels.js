@@ -81,7 +81,7 @@ function channelsPage() {
     whatsappAdvancedFields() {
       if (!this.setupModal || !this.setupModal.fields || this.setupModal.name !== 'whatsapp') return [];
       return this.setupModal.fields.filter(function(f) {
-        return f.key.indexOf('voice.') === 0 || f.key === 'default_agent';
+        return f.key.indexOf('voice.') === 0 || f.key === 'default_agent' || f.key === 'self_chat_mode';
       });
     },
 
@@ -95,6 +95,13 @@ function channelsPage() {
 
     isDefaultAgentField(field) {
       return !!field && field.key === 'default_agent';
+    },
+
+    hasAvailableAgent(name) {
+      if (!name) return false;
+      return this.availableAgents.some(function(agentName) {
+        return agentName === name;
+      });
     },
 
     isQrChannel() {

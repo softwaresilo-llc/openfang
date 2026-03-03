@@ -160,6 +160,11 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::OpenFangKernel>)
         .as_deref()
         .unwrap_or("assistant")
         .to_string();
+    let self_chat_mode = if wa_config.self_chat_mode {
+        "true"
+    } else {
+        "false"
+    };
 
     // Auto-set the env var so the rest of the system finds the gateway
     std::env::set_var(
@@ -186,6 +191,7 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::OpenFangKernel>)
                 .env("WHATSAPP_GATEWAY_PORT", port.to_string())
                 .env("OPENFANG_URL", &openfang_url)
                 .env("OPENFANG_DEFAULT_AGENT", &default_agent)
+                .env("OPENFANG_WHATSAPP_SELF_CHAT_MODE", self_chat_mode)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .spawn();

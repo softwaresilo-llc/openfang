@@ -2000,6 +2000,9 @@
                                 <template x-if="isDefaultAgentField(f)">
                                   <select class="form-input" x-model="formValues[f.key]">
                                     <option value="">(not set)</option>
+                                    <template x-if="formValues[f.key] && !hasAvailableAgent(formValues[f.key])">
+                                      <option :value="formValues[f.key]" x-text="formValues[f.key] + ' (saved)'"></option>
+                                    </template>
                                     <template x-for="agentName in availableAgents" :key="agentName">
                                       <option :value="agentName" x-text="agentName"></option>
                                     </template>
@@ -2012,6 +2015,12 @@
                                   <input class="form-input" type="number"
                                          x-model="formValues[f.key]"
                                          :placeholder="f.placeholder">
+                                </template>
+                                <template x-if="!isDefaultAgentField(f) && f.type === 'boolean'">
+                                  <select class="form-input" x-model="formValues[f.key]">
+                                    <option value="false">false</option>
+                                    <option value="true">true</option>
+                                  </select>
                                 </template>
                                 <template x-if="!isDefaultAgentField(f) && (f.type === 'text' || f.type === 'list')">
                                   <input class="form-input" type="text"
@@ -2072,6 +2081,9 @@
                         <template x-if="isDefaultAgentField(f)">
                           <select class="form-input" x-model="formValues[f.key]">
                             <option value="">(not set)</option>
+                            <template x-if="formValues[f.key] && !hasAvailableAgent(formValues[f.key])">
+                              <option :value="formValues[f.key]" x-text="formValues[f.key] + ' (saved)'"></option>
+                            </template>
                             <template x-for="agentName in availableAgents" :key="agentName">
                               <option :value="agentName" x-text="agentName"></option>
                             </template>
@@ -2084,6 +2096,12 @@
                           <input class="form-input" type="number"
                                  x-model="formValues[f.key]"
                                  :placeholder="f.placeholder">
+                        </template>
+                        <template x-if="!isDefaultAgentField(f) && f.type === 'boolean'">
+                          <select class="form-input" x-model="formValues[f.key]">
+                            <option value="false">false</option>
+                            <option value="true">true</option>
+                          </select>
                         </template>
                         <template x-if="!isDefaultAgentField(f) && (f.type === 'text' || f.type === 'list')">
                           <input class="form-input" type="text"
@@ -2114,6 +2132,9 @@
                                 <template x-if="isDefaultAgentField(f)">
                                   <select class="form-input" x-model="formValues[f.key]">
                                     <option value="">(not set)</option>
+                                    <template x-if="formValues[f.key] && !hasAvailableAgent(formValues[f.key])">
+                                      <option :value="formValues[f.key]" x-text="formValues[f.key] + ' (saved)'"></option>
+                                    </template>
                                     <template x-for="agentName in availableAgents" :key="agentName">
                                       <option :value="agentName" x-text="agentName"></option>
                                     </template>
@@ -2126,6 +2147,12 @@
                                   <input class="form-input" type="number"
                                          x-model="formValues[f.key]"
                                          :placeholder="f.placeholder">
+                                </template>
+                                <template x-if="!isDefaultAgentField(f) && f.type === 'boolean'">
+                                  <select class="form-input" x-model="formValues[f.key]">
+                                    <option value="false">false</option>
+                                    <option value="true">true</option>
+                                  </select>
                                 </template>
                                 <template x-if="!isDefaultAgentField(f) && (f.type === 'text' || f.type === 'list')">
                                   <input class="form-input" type="text"

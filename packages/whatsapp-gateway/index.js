@@ -9,6 +9,9 @@ const { randomUUID } = require('node:crypto');
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const OPENFANG_URL = (process.env.OPENFANG_URL || 'http://127.0.0.1:4200').replace(/\/+$/, '');
+const SELF_CHAT_MODE = /^(1|true|yes|on)$/i.test(
+  String(process.env.OPENFANG_WHATSAPP_SELF_CHAT_MODE || 'false')
+);
 
 // ---------------------------------------------------------------------------
 // State
@@ -23,6 +26,8 @@ const inboundEvents = []; // queued inbound events for the Rust channel adapter
 const MAX_INBOUND_EVENTS = 200;
 const mediaStore = new Map(); // mediaId -> { data: Buffer, mimeType: string, expiresAt: number }
 const MEDIA_TTL_MS = 5 * 60 * 1000;
+const outboundMessageIds = new Map(); // messageId -> expiresAt
+const OUTBOUND_ID_TTL_MS = 10 * 60 * 1000;
 
 function enqueueInboundEvent(event) {
   if (!event) return;
@@ -55,10 +60,48 @@ function readMedia(mediaId) {
   return item;
 }
 
+function trackOutboundMessageId(messageId) {
+  if (!messageId) return;
+  outboundMessageIds.set(messageId, Date.now() + OUTBOUND_ID_TTL_MS);
+}
+
+function consumeTrackedOutboundMessageId(messageId) {
+  if (!messageId) return false;
+  const expiresAt = outboundMessageIds.get(messageId);
+  if (!expiresAt) return false;
+  outboundMessageIds.delete(messageId);
+  if (Date.now() > expiresAt) return false;
+  return true;
+}
+
+function normalizedWaIdNumber(raw) {
+  if (!raw) return '';
+  return String(raw)
+    .split('@')[0]
+    .split(':')[0]
+    .replace(/[^\d]/g, '');
+}
+
+function isSelfChat(remoteJid) {
+  const remoteHost = String(remoteJid || '').split('@')[1] || '';
+  const remoteNumber = normalizedWaIdNumber(remoteJid);
+  if (!remoteNumber) return false;
+  const myPhoneNumber = normalizedWaIdNumber(sock?.user?.id || '');
+  const myLidNumber = normalizedWaIdNumber(sock?.user?.lid || '');
+  if (remoteHost === 'lid') {
+    if (myLidNumber) return remoteNumber === myLidNumber;
+    return myPhoneNumber ? remoteNumber === myPhoneNumber : false;
+  }
+  return myPhoneNumber ? remoteNumber === myPhoneNumber : false;
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [id, item] of mediaStore.entries()) {
     if (now > item.expiresAt) mediaStore.delete(id);
+  }
+  for (const [messageId, expiresAt] of outboundMessageIds.entries()) {
+    if (now > expiresAt) outboundMessageIds.delete(messageId);
   }
 }, 30_000);
 
@@ -161,11 +204,21 @@ async function startConnection() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // Skip messages from self and status broadcasts
-      if (msg.key.fromMe) continue;
-      if (msg.key.remoteJid === 'status@broadcast') continue;
+      const remoteJid = msg.key.remoteJid || '';
+      if (remoteJid === 'status@broadcast') continue;
 
-      const sender = msg.key.remoteJid || '';
+      const messageId = msg.key.id || '';
+      if (consumeTrackedOutboundMessageId(messageId)) {
+        // This is our own outbound echo; ignore it to prevent loops.
+        continue;
+      }
+
+      const selfChat = isSelfChat(remoteJid);
+      if (msg.key.fromMe && (!SELF_CHAT_MODE || !selfChat)) {
+        continue;
+      }
+
+      const sender = remoteJid;
       const text = msg.message?.conversation
         || msg.message?.extendedTextMessage?.text
         || msg.message?.imageMessage?.caption
@@ -227,7 +280,11 @@ async function sendMessage(to, text) {
   // Normalize phone → JID: "+1234567890" → "1234567890@s.whatsapp.net"
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
 
-  await sock.sendMessage(jid, { text });
+  const sent = await sock.sendMessage(jid, { text });
+  const sentId = sent?.key?.id;
+  if (sentId) {
+    trackOutboundMessageId(sentId);
+  }
 }
 
 async function sendVoiceMessage(to, voiceUrl, ptt = true) {
@@ -255,11 +312,15 @@ async function sendVoiceMessage(to, voiceUrl, ptt = true) {
   }
 
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
-  await sock.sendMessage(jid, {
+  const sent = await sock.sendMessage(jid, {
     audio: audioBuffer,
     mimetype: mimeType || 'audio/ogg',
     ptt: !!ptt,
   });
+  const sentId = sent?.key?.id;
+  if (sentId) {
+    trackOutboundMessageId(sentId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +463,7 @@ const server = http.createServer(async (req, res) => {
         status: 'ok',
         connected: connStatus === 'connected',
         session_id: sessionId || null,
+        self_chat_mode: SELF_CHAT_MODE,
       });
     }
 
@@ -416,6 +478,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] OpenFang URL: ${OPENFANG_URL}`);
+  console.log(`[gateway] Self-chat mode: ${SELF_CHAT_MODE ? 'enabled' : 'disabled'}`);
   console.log('[gateway] Waiting for POST /login/start and /events/poll ...');
 });
 

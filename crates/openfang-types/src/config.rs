@@ -1763,6 +1763,9 @@ pub struct WhatsAppConfig {
     pub allowed_users: Vec<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Allow processing self-chat messages (same WhatsApp account) when true.
+    /// Disabled by default to avoid accidental loops.
+    pub self_chat_mode: bool,
     /// Voice reply behavior.
     #[serde(default)]
     pub voice: ChannelVoiceConfig,
@@ -1781,6 +1784,7 @@ impl Default for WhatsAppConfig {
             gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
             allowed_users: vec![],
             default_agent: None,
+            self_chat_mode: false,
             voice: ChannelVoiceConfig::default(),
             overrides: ChannelOverrides::default(),
         }
@@ -3488,6 +3492,7 @@ mod tests {
         assert_eq!(wa.access_token_env, "WHATSAPP_ACCESS_TOKEN");
         assert_eq!(wa.webhook_port, 8443);
         assert!(wa.allowed_users.is_empty());
+        assert!(!wa.self_chat_mode);
         assert_eq!(wa.voice.reply_mode, VoiceReplyMode::Off);
         assert_eq!(wa.voice.default_language, VoiceLanguage::De);
     }
@@ -3525,6 +3530,7 @@ mod tests {
         let json = serde_json::to_string(&wa).unwrap();
         let back: WhatsAppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.phone_number_id, "12345");
+        assert!(!back.self_chat_mode);
         assert_eq!(back.voice.reply_mode, VoiceReplyMode::Off);
     }
 

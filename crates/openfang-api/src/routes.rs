@@ -1161,6 +1161,7 @@ enum FieldType {
     Text,
     Number,
     List,
+    Boolean,
 }
 
 impl FieldType {
@@ -1170,6 +1171,7 @@ impl FieldType {
             Self::Text => "text",
             Self::Number => "number",
             Self::List => "list",
+            Self::Boolean => "boolean",
         }
     }
 }
@@ -1265,6 +1267,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "voice.default_language", label: "Voice Default Language", field_type: FieldType::Text, env_var: None, required: false, placeholder: "de | en", advanced: true },
             ChannelField { key: "voice.auto_min_text_length", label: "Voice Auto Min Text Length", field_type: FieldType::Number, env_var: None, required: false, placeholder: "48", advanced: true },
             ChannelField { key: "voice.auto_keywords", label: "Voice Auto Keywords", field_type: FieldType::List, env_var: None, required: false, placeholder: "voice, audio, sprachnachricht", advanced: true },
+            ChannelField { key: "self_chat_mode", label: "Self Chat Mode", field_type: FieldType::Boolean, env_var: None, required: false, placeholder: "false", advanced: true },
             // Business API fallback fields — all advanced (hidden behind "Use Business API" toggle)
             ChannelField { key: "access_token_env", label: "Access Token", field_type: FieldType::Secret, env_var: Some("WHATSAPP_ACCESS_TOKEN"), required: false, placeholder: "EAAx...", advanced: true },
             ChannelField { key: "phone_number_id", label: "Phone Number ID", field_type: FieldType::Text, env_var: None, required: false, placeholder: "1234567890", advanced: true },
@@ -1273,7 +1276,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
         ],
         setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
-        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"\n\n[channels.whatsapp.voice]\nreply_mode = \"off\"\ndefault_language = \"de\"",
+        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"\nself_chat_mode = false\n\n[channels.whatsapp.voice]\nreply_mode = \"off\"\ndefault_language = \"de\"",
     },
     ChannelMeta {
         name: "signal", display_name: "Signal", icon: "SG",
@@ -2208,11 +2211,20 @@ pub async fn configure_channel(
     let mut config_fields: HashMap<String, toml::Value> = HashMap::new();
 
     for field_def in meta.fields {
-        let value = fields
-            .get(field_def.key)
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let value = value.trim();
+        let value_raw = fields.get(field_def.key);
+        let value_owned = match value_raw {
+            Some(v) if v.is_string() => v.as_str().unwrap_or_default().to_string(),
+            Some(v) if v.is_boolean() => {
+                if v.as_bool().unwrap_or(false) {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
+            Some(v) if v.is_number() => v.to_string(),
+            _ => String::new(),
+        };
+        let value = value_owned.trim();
         if value.is_empty() {
             continue;
         }
@@ -2258,6 +2270,21 @@ pub async fn configure_channel(
                         .map(|s| toml::Value::String(s.to_string()))
                         .collect();
                     toml::Value::Array(items)
+                }
+                FieldType::Boolean => {
+                    let b = match value.to_ascii_lowercase().as_str() {
+                        "1" | "true" | "yes" | "on" => true,
+                        "0" | "false" | "no" | "off" => false,
+                        _ => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({
+                                    "error": format!("Invalid boolean for field '{}'", field_def.key)
+                                })),
+                            );
+                        }
+                    };
+                    toml::Value::Boolean(b)
                 }
                 // Secret fields are handled via environment variables above.
                 FieldType::Secret => toml::Value::String(value.to_string()),
