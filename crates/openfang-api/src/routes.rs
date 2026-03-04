@@ -116,20 +116,63 @@ pub async fn spawn_agent(
 
 /// GET /api/agents — List all agents.
 pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Snapshot catalog once for enrichment
+    let catalog = state.kernel.model_catalog.read().ok();
+    let dm = &state.kernel.config.default_model;
+
     let agents: Vec<serde_json::Value> = state
         .kernel
         .registry
         .list()
         .into_iter()
         .map(|e| {
+            // Resolve "default" provider/model to actual kernel defaults
+            let provider = if e.manifest.model.provider.is_empty()
+                || e.manifest.model.provider == "default"
+            {
+                dm.provider.as_str()
+            } else {
+                e.manifest.model.provider.as_str()
+            };
+            let model = if e.manifest.model.model.is_empty()
+                || e.manifest.model.model == "default"
+            {
+                dm.model.as_str()
+            } else {
+                e.manifest.model.model.as_str()
+            };
+
+            // Enrich from catalog
+            let (tier, auth_status) = catalog
+                .as_ref()
+                .map(|cat| {
+                    let tier = cat
+                        .find_model(model)
+                        .map(|m| format!("{:?}", m.tier).to_lowercase())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let auth = cat
+                        .get_provider(provider)
+                        .map(|p| format!("{:?}", p.auth_status).to_lowercase())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    (tier, auth)
+                })
+                .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+
+            let ready = matches!(e.state, openfang_types::agent::AgentState::Running)
+                && auth_status != "missing";
+
             serde_json::json!({
                 "id": e.id.to_string(),
                 "name": e.name,
                 "state": format!("{:?}", e.state),
                 "mode": e.mode,
                 "created_at": e.created_at.to_rfc3339(),
-                "model_provider": e.manifest.model.provider,
-                "model_name": e.manifest.model.model,
+                "last_active": e.last_active.to_rfc3339(),
+                "model_provider": provider,
+                "model_name": model,
+                "model_tier": tier,
+                "auth_status": auth_status,
+                "ready": ready,
                 "profile": e.manifest.profile,
                 "identity": {
                     "emoji": e.identity.emoji,
@@ -2136,6 +2179,12 @@ pub async fn configure_channel(
             unsafe {
                 std::env::set_var(env_var, value);
             }
+            // Also write the env var NAME to config.toml so the channel section
+            // is not empty and the kernel knows which env var to read.
+            config_fields.insert(
+                field_def.key.to_string(),
+                toml::Value::String(env_var.to_string()),
+            );
         } else {
             // Config field — collect for TOML write with typed values.
             let toml_value = match field_def.field_type {
@@ -2649,19 +2698,14 @@ pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
+///
+/// Note: memory_store tool writes to a shared namespace, so we read from that
+/// same namespace regardless of which agent ID is in the URL.
 pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
+    Path(_id): Path<String>,
 ) -> impl IntoResponse {
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            );
-        }
-    };
+    let agent_id = openfang_kernel::kernel::shared_memory_agent_id();
 
     match state.kernel.memory.list_kv(agent_id) {
         Ok(pairs) => {
@@ -2672,7 +2716,7 @@ pub async fn get_agent_kv(
             (StatusCode::OK, Json(serde_json::json!({"kv_pairs": kv})))
         }
         Err(e) => {
-            tracing::warn!("Memory list_kv failed for agent {id}: {e}");
+            tracing::warn!("Memory list_kv failed: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Memory operation failed"})),
@@ -2684,17 +2728,9 @@ pub async fn get_agent_kv(
 /// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
 pub async fn get_agent_kv_key(
     State(state): State<Arc<AppState>>,
-    Path((id, key)): Path<(String, String)>,
+    Path((_id, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            );
-        }
-    };
+    let agent_id = openfang_kernel::kernel::shared_memory_agent_id();
 
     match state.kernel.memory.structured_get(agent_id, &key) {
         Ok(Some(val)) => (
@@ -2706,7 +2742,7 @@ pub async fn get_agent_kv_key(
             Json(serde_json::json!({"error": "Key not found"})),
         ),
         Err(e) => {
-            tracing::warn!("Memory get failed for agent {id}, key '{key}': {e}");
+            tracing::warn!("Memory get failed for key '{key}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Memory operation failed"})),
@@ -2718,18 +2754,10 @@ pub async fn get_agent_kv_key(
 /// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
 pub async fn set_agent_kv_key(
     State(state): State<Arc<AppState>>,
-    Path((id, key)): Path<(String, String)>,
+    Path((_id, key)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            );
-        }
-    };
+    let agent_id = openfang_kernel::kernel::shared_memory_agent_id();
 
     let value = body.get("value").cloned().unwrap_or(body);
 
@@ -2739,7 +2767,7 @@ pub async fn set_agent_kv_key(
             Json(serde_json::json!({"status": "stored", "key": key})),
         ),
         Err(e) => {
-            tracing::warn!("Memory set failed for agent {id}, key '{key}': {e}");
+            tracing::warn!("Memory set failed for key '{key}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Memory operation failed"})),
@@ -2751,17 +2779,9 @@ pub async fn set_agent_kv_key(
 /// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
 pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
-    Path((id, key)): Path<(String, String)>,
+    Path((_id, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let agent_id: AgentId = match id.parse() {
-        Ok(id) => id,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
-            );
-        }
-    };
+    let agent_id = openfang_kernel::kernel::shared_memory_agent_id();
 
     match state.kernel.memory.structured_delete(agent_id, &key) {
         Ok(()) => (
@@ -2769,7 +2789,7 @@ pub async fn delete_agent_kv_key(
             Json(serde_json::json!({"status": "deleted", "key": key})),
         ),
         Err(e) => {
-            tracing::warn!("Memory delete failed for agent {id}, key '{key}': {e}");
+            tracing::warn!("Memory delete failed for key '{key}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({"error": "Memory operation failed"})),
@@ -3811,6 +3831,42 @@ pub async fn install_hand_deps(
     )
 }
 
+/// POST /api/hands/install — Install a hand from TOML content.
+pub async fn install_hand(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let toml_content = body["toml_content"].as_str().unwrap_or("");
+    let skill_content = body["skill_content"].as_str().unwrap_or("");
+
+    if toml_content.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing toml_content field"})),
+        );
+    }
+
+    match state
+        .kernel
+        .hand_registry
+        .install_from_content(toml_content, skill_content)
+    {
+        Ok(def) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": def.id,
+                "name": def.name,
+                "description": def.description,
+                "category": format!("{:?}", def.category),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("{e}")})),
+        ),
+    }
+}
+
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
 pub async fn activate_hand(
     State(state): State<Arc<AppState>>,
@@ -3820,17 +3876,36 @@ pub async fn activate_hand(
     let config = body.map(|b| b.0.config).unwrap_or_default();
 
     match state.kernel.activate_hand(&hand_id, config) {
-        Ok(instance) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "instance_id": instance.instance_id,
-                "hand_id": instance.hand_id,
-                "status": format!("{}", instance.status),
-                "agent_id": instance.agent_id.map(|a| a.to_string()),
-                "agent_name": instance.agent_name,
-                "activated_at": instance.activated_at.to_rfc3339(),
-            })),
-        ),
+        Ok(instance) => {
+            // If the hand agent has a non-reactive schedule (autonomous hands),
+            // start its background loop so it begins running immediately.
+            if let Some(agent_id) = instance.agent_id {
+                let entry = state.kernel.registry.list().into_iter().find(|e| e.id == agent_id);
+                if let Some(entry) = entry {
+                    if !matches!(
+                        entry.manifest.schedule,
+                        openfang_types::agent::ScheduleMode::Reactive
+                    ) {
+                        state.kernel.start_background_for_agent(
+                            agent_id,
+                            &entry.name,
+                            &entry.manifest.schedule,
+                        );
+                    }
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "instance_id": instance.instance_id,
+                    "hand_id": instance.hand_id,
+                    "status": format!("{}", instance.status),
+                    "agent_id": instance.agent_id.map(|a| a.to_string()),
+                    "agent_name": instance.agent_name,
+                    "activated_at": instance.activated_at.to_rfc3339(),
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -9102,7 +9177,9 @@ fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
     match value {
         serde_json::Value::String(s) => toml::Value::String(s.clone()),
         serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
+            if let Some(i) = n.as_u64() {
+                toml::Value::Integer(i as i64)
+            } else if let Some(i) = n.as_i64() {
                 toml::Value::Integer(i)
             } else if let Some(f) = n.as_f64() {
                 toml::Value::Float(f)
