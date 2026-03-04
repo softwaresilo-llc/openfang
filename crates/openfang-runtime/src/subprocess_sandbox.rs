@@ -209,15 +209,30 @@ async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
     use tokio::process::Command;
 
     let pid_i32 = pid as i32;
+    // Only send signals to a process group when the target PID is the
+    // group leader. Otherwise `kill -TERM -PID` could hit an unrelated group.
+    let can_group_kill = {
+        let pgid_out = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &pid.to_string()])
+            .output()
+            .await
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string());
+        pgid_out
+            .as_deref()
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|pgid| pgid == pid_i32)
+            .unwrap_or(false)
+    };
 
-    // Try to kill the process group first (negative PID).
-    // This kills the process and all its children.
-    let group_kill = Command::new("kill")
-        .args(["-TERM", &format!("-{pid_i32}")])
-        .output()
-        .await;
-
-    if group_kill.is_err() {
+    if can_group_kill {
+        // Kill the process group (process + descendants).
+        let _ = Command::new("kill")
+            .args(["-TERM", &format!("-{pid_i32}")])
+            .output()
+            .await;
+    } else {
         // Fallback: kill just the process.
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
@@ -242,11 +257,12 @@ async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
                 "Process still alive after grace period, sending SIGKILL"
             );
 
-            // Try group kill first.
-            let _ = Command::new("kill")
-                .args(["-9", &format!("-{pid_i32}")])
-                .output()
-                .await;
+            if can_group_kill {
+                let _ = Command::new("kill")
+                    .args(["-9", &format!("-{pid_i32}")])
+                    .output()
+                    .await;
+            }
 
             // Also try direct kill.
             let _ = Command::new("kill")
