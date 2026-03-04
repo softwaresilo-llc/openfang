@@ -1868,14 +1868,8 @@ impl App {
                                             .as_str()
                                             .unwrap_or("")
                                             .to_string(),
-                                        provider: m["provider"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string(),
-                                        tier: m["tier"]
-                                            .as_str()
-                                            .unwrap_or("Balanced")
-                                            .to_string(),
+                                        provider: m["provider"].as_str().unwrap_or("").to_string(),
+                                        tier: m["tier"].as_str().unwrap_or("Balanced").to_string(),
                                     })
                                     .collect()
                             })
@@ -1934,8 +1928,7 @@ impl App {
                                 .send()
                             {
                                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                                    let provider =
-                                        body["model_provider"].as_str().unwrap_or("?");
+                                    let provider = body["model_provider"].as_str().unwrap_or("?");
                                     let model = body["model_name"].as_str().unwrap_or("?");
                                     self.chat.model_label = format!("{provider}/{model}");
                                 }
@@ -1987,10 +1980,8 @@ impl App {
                             );
                         }
                         Err(e) => {
-                            self.chat.push_message(
-                                chat::Role::System,
-                                format!("Switch failed: {e}"),
-                            );
+                            self.chat
+                                .push_message(chat::Role::System, format!("Switch failed: {e}"));
                         }
                     }
                 }

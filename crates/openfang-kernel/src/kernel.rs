@@ -1039,11 +1039,20 @@ impl OpenFangKernel {
                             if !dm.model.is_empty() {
                                 restored_entry.manifest.model.model = dm.model.clone();
                             }
-                            if !dm.api_key_env.is_empty() && restored_entry.manifest.model.api_key_env.is_none() {
-                                restored_entry.manifest.model.api_key_env = Some(dm.api_key_env.clone());
+                            if !dm.api_key_env.is_empty()
+                                && restored_entry.manifest.model.api_key_env.is_none()
+                            {
+                                restored_entry.manifest.model.api_key_env =
+                                    Some(dm.api_key_env.clone());
                             }
-                            if dm.base_url.is_some() && restored_entry.manifest.model.base_url.is_none() {
-                                restored_entry.manifest.model.base_url.clone_from(&dm.base_url);
+                            if dm.base_url.is_some()
+                                && restored_entry.manifest.model.base_url.is_none()
+                            {
+                                restored_entry
+                                    .manifest
+                                    .model
+                                    .base_url
+                                    .clone_from(&dm.base_url);
                             }
                         }
                     }
@@ -2974,7 +2983,11 @@ impl OpenFangKernel {
         }
 
         // If an agent with this hand's name already exists, remove it first
-        let existing = self.registry.list().into_iter().find(|e| e.name == def.agent.name);
+        let existing = self
+            .registry
+            .list()
+            .into_iter()
+            .find(|e| e.name == def.agent.name);
         if let Some(old) = existing {
             info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
             let _ = self.kill_agent(old.id);

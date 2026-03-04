@@ -40,7 +40,7 @@ impl MediaEngine {
 
         // Determine which provider to use
         let provider = configured_provider(self.config.image_provider.as_deref())
-            .or_else(|| detect_vision_provider())
+            .or(detect_vision_provider())
             .ok_or("No vision-capable LLM provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY")?;
 
         // For now, return a structured result indicating the provider.
@@ -72,7 +72,7 @@ impl MediaEngine {
 
         let provider = self.config.audio_provider.as_deref();
         let provider = configured_provider(provider)
-            .or_else(|| detect_audio_provider())
+            .or(detect_audio_provider())
             .ok_or(
                 "No audio transcription provider configured. Set GROQ_API_KEY, OPENAI_API_KEY, or media.audio_provider='local'",
             )?;
@@ -322,6 +322,7 @@ impl MediaEngine {
         Ok((text, model))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn transcribe_audio_local_http(
         &self,
         endpoint: &str,

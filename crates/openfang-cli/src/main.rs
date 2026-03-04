@@ -2022,18 +2022,14 @@ fn cmd_doctor(json: bool, repair: bool) {
                             ui::check_ok(".env file (permissions fixed to 0600)");
                         }
                         repaired = true;
-                    } else {
-                        if !json {
-                            ui::check_warn(&format!(
-                                ".env file has loose permissions ({:o}), should be 0600",
-                                mode
-                            ));
-                        }
+                    } else if !json {
+                        ui::check_warn(&format!(
+                            ".env file has loose permissions ({:o}), should be 0600",
+                            mode
+                        ));
                     }
-                } else {
-                    if !json {
-                        ui::check_ok(".env file");
-                    }
+                } else if !json {
+                    ui::check_ok(".env file");
                 }
             }
             #[cfg(not(unix))]
@@ -2157,7 +2153,9 @@ decay_rate = 0.05
                     if !json {
                         ui::check_ok(&format!("Port {api_listen} is available"));
                     }
-                    checks.push(serde_json::json!({"check": "port", "status": "ok", "address": api_listen}));
+                    checks.push(
+                        serde_json::json!({"check": "port", "status": "ok", "address": api_listen}),
+                    );
                 }
                 Err(_) => {
                     if !json {
@@ -3924,7 +3922,10 @@ fn cmd_hand_install(path: &str) {
         body["name"].as_str().unwrap_or("?"),
         body["id"].as_str().unwrap_or("?"),
     );
-    println!("Use `openfang hand activate {}` to start it.", body["id"].as_str().unwrap_or("?"));
+    println!(
+        "Use `openfang hand activate {}` to start it.",
+        body["id"].as_str().unwrap_or("?")
+    );
 }
 
 fn cmd_hand_list() {

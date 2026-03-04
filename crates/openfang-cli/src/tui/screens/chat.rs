@@ -483,8 +483,7 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
         return; // Too small to show picker
     }
     let popup_w = area.width.clamp(30, 54);
-    let popup_h = (filtered.len() as u16 + 4)
-        .clamp(5, area.height.saturating_sub(2));
+    let popup_h = (filtered.len() as u16 + 4).clamp(5, area.height.saturating_sub(2));
     let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(x, y, popup_w, popup_h);
@@ -548,7 +547,12 @@ fn draw_model_picker(f: &mut Frame, area: Rect, state: &ChatState) {
 
     let mut lines: Vec<Line> = Vec::new();
     let max_name = (chunks[1].width as usize).saturating_sub(14);
-    for (i, entry) in filtered.iter().enumerate().skip(scroll_start).take(visible_h) {
+    for (i, entry) in filtered
+        .iter()
+        .enumerate()
+        .skip(scroll_start)
+        .take(visible_h)
+    {
         let selected = i == state.model_picker_idx;
         let indicator = if selected { "\u{25b6} " } else { "  " };
 

@@ -884,6 +884,7 @@ async fn handle_room_command(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_group_room_message(
     message: &ChannelMessage,
     text: &str,

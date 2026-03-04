@@ -797,7 +797,10 @@ async fn handle_command(
                 match state.kernel.set_agent_model(agent_id, args) {
                     Ok(()) => {
                         let msg = if let Some(entry) = state.kernel.registry.get(agent_id) {
-                            format!("Model switched to: {} (provider: {})", entry.manifest.model.model, entry.manifest.model.provider)
+                            format!(
+                                "Model switched to: {} (provider: {})",
+                                entry.manifest.model.model, entry.manifest.model.provider
+                            )
                         } else {
                             format!("Model switched to: {args}")
                         };
