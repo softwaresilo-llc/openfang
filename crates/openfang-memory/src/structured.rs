@@ -191,7 +191,14 @@ impl StructuredStore {
             } else {
                 None
             };
-            Ok((name, manifest_blob, state_str, created_str, session_id_str, identity_str))
+            Ok((
+                name,
+                manifest_blob,
+                state_str,
+                created_str,
+                session_id_str,
+                identity_str,
+            ))
         });
 
         match result {
@@ -306,13 +313,14 @@ impl StructuredStore {
         let mut repair_queue: Vec<(String, Vec<u8>, String)> = Vec::new();
 
         for row in rows {
-            let (id_str, name, manifest_blob, state_str, created_str, session_id_str, identity_str) = match row {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("Skipping agent row with read error: {e}");
-                    continue;
-                }
-            };
+            let (id_str, name, manifest_blob, state_str, created_str, session_id_str, identity_str) =
+                match row {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("Skipping agent row with read error: {e}");
+                        continue;
+                    }
+                };
 
             // Deduplicate: skip agents with names we've already seen
             let name_lower = name.to_lowercase();
