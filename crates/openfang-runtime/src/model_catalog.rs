@@ -272,11 +272,16 @@ impl ModelCatalog {
 
     /// Add a custom model at runtime.
     ///
-    /// Returns `true` if the model was added, `false` if a model with that ID
-    /// already exists (case-insensitive).
+    /// Returns `true` if the model was added, `false` if a model with the same
+    /// ID **and** provider already exists (case-insensitive).
     pub fn add_custom_model(&mut self, entry: ModelCatalogEntry) -> bool {
-        let lower = entry.id.to_lowercase();
-        if self.models.iter().any(|m| m.id.to_lowercase() == lower) {
+        let lower_id = entry.id.to_lowercase();
+        let lower_provider = entry.provider.to_lowercase();
+        if self
+            .models
+            .iter()
+            .any(|m| m.id.to_lowercase() == lower_id && m.provider.to_lowercase() == lower_provider)
+        {
             return false;
         }
         let provider = entry.provider.clone();
