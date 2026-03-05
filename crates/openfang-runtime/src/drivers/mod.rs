@@ -11,6 +11,7 @@ pub mod copilot;
 pub mod fallback;
 pub mod gemini;
 pub mod gemini_cli;
+pub mod kilocode_cli;
 pub mod openai;
 pub mod opencode_cli;
 
@@ -158,6 +159,11 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             key_required: false,
         }),
         "opencode-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "kilocode-cli" => Some(ProviderDefaults {
             base_url: "",
             api_key_env: "",
             key_required: false,
@@ -323,6 +329,12 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         return Ok(Arc::new(opencode_cli::OpenCodeCliDriver::new(cli_path)));
     }
 
+    // KiloCode CLI — subprocess-based, no API key required.
+    if provider == "kilocode-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(kilocode_cli::KiloCodeCliDriver::new(cli_path)));
+    }
+
     // GitHub Copilot — wraps OpenAI-compatible driver with automatic token exchange.
     // The CopilotDriver exchanges the GitHub PAT for a Copilot API token on demand,
     // caches it, and refreshes when expired.
@@ -384,8 +396,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             venice, codex, claude-code, codex-cli, gemini-cli, opencode-cli. Or set base_url \
-             for a custom OpenAI-compatible endpoint.",
+             venice, codex, claude-code, codex-cli, gemini-cli, opencode-cli, kilocode-cli. \
+             Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -428,6 +440,7 @@ pub fn known_providers() -> &'static [&'static str] {
         "codex-cli",
         "gemini-cli",
         "opencode-cli",
+        "kilocode-cli",
     ]
 }
 
@@ -527,7 +540,8 @@ mod tests {
         assert!(providers.contains(&"codex-cli"));
         assert!(providers.contains(&"gemini-cli"));
         assert!(providers.contains(&"opencode-cli"));
-        assert_eq!(providers.len(), 34);
+        assert!(providers.contains(&"kilocode-cli"));
+        assert_eq!(providers.len(), 35);
     }
 
     #[test]
