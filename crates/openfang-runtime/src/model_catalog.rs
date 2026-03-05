@@ -9,8 +9,8 @@ use openfang_types::model_catalog::{
     GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL,
     LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL,
     OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, XAI_BASE_URL,
-    ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
 };
 use std::collections::HashMap;
 
@@ -187,9 +187,18 @@ impl ModelCatalog {
     ///
     /// Each entry maps a provider ID to a custom base URL.
     /// Unknown providers are silently skipped.
+    /// Providers with explicit URL overrides are marked as configured since
+    /// the user intentionally set them up (e.g. local proxies, custom endpoints).
     pub fn apply_url_overrides(&mut self, overrides: &HashMap<String, String>) {
         for (provider, url) in overrides {
-            self.set_provider_url(provider, url);
+            if self.set_provider_url(provider, url) {
+                // Mark as configured so models from this provider show as available
+                if let Some(p) = self.providers.iter_mut().find(|p| p.id == *provider) {
+                    if p.auth_status == AuthStatus::Missing {
+                        p.auth_status = AuthStatus::Configured;
+                    }
+                }
+            }
         }
     }
 
@@ -602,6 +611,24 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             model_count: 0,
         },
         ProviderInfo {
+            id: "zai".into(),
+            display_name: "Z.AI".into(),
+            api_key_env: "ZHIPU_API_KEY".into(),
+            base_url: ZAI_BASE_URL.into(),
+            key_required: true,
+            auth_status: AuthStatus::Missing,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "zai_coding".into(),
+            display_name: "Z.AI Coding".into(),
+            api_key_env: "ZHIPU_API_KEY".into(),
+            base_url: ZAI_CODING_BASE_URL.into(),
+            key_required: true,
+            auth_status: AuthStatus::Missing,
+            model_count: 0,
+        },
+        ProviderInfo {
             id: "moonshot".into(),
             display_name: "Moonshot (Kimi)".into(),
             api_key_env: "MOONSHOT_API_KEY".into(),
@@ -615,6 +642,16 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             display_name: "Baidu Qianfan".into(),
             api_key_env: "QIANFAN_API_KEY".into(),
             base_url: QIANFAN_BASE_URL.into(),
+            key_required: true,
+            auth_status: AuthStatus::Missing,
+            model_count: 0,
+        },
+        // ── Volcano Engine (Doubao) ──────────────────────────────────
+        ProviderInfo {
+            id: "volcengine".into(),
+            display_name: "Volcano Engine (Doubao)".into(),
+            api_key_env: "VOLCENGINE_API_KEY".into(),
+            base_url: VOLCENGINE_BASE_URL.into(),
             key_required: true,
             auth_status: AuthStatus::Missing,
             model_count: 0,
@@ -729,7 +766,7 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("copilot-gpt4", "copilot/gpt-4"),
         // Chinese model aliases
         ("qwen", "qwen-plus"),
-        ("glm", "glm-4-plus"),
+        ("glm", "glm-5-20250605"),
         ("ernie", "ernie-4.5-8k"),
         ("kimi", "moonshot-v1-128k"),
         ("minimax", "MiniMax-M2.5"),
@@ -2638,7 +2675,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec![],
         },
         // ══════════════════════════════════════════════════════════════
-        // Zhipu AI / GLM (4)
+        // Zhipu AI / GLM (6)
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
             id: "glm-4-plus".into(),
@@ -2693,6 +2730,34 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             output_cost_per_m: 0.10,
             supports_tools: true,
             supports_vision: false,
+            supports_streaming: true,
+            aliases: vec![],
+        },
+        ModelCatalogEntry {
+            id: "glm-5-20250605".into(),
+            display_name: "GLM-5".into(),
+            provider: "zhipu".into(),
+            tier: ModelTier::Frontier,
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+            input_cost_per_m: 2.00,
+            output_cost_per_m: 8.00,
+            supports_tools: true,
+            supports_vision: true,
+            supports_streaming: true,
+            aliases: vec!["glm-5".into()],
+        },
+        ModelCatalogEntry {
+            id: "glm-4.7".into(),
+            display_name: "GLM-4.7".into(),
+            provider: "zhipu".into(),
+            tier: ModelTier::Smart,
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+            input_cost_per_m: 1.50,
+            output_cost_per_m: 5.00,
+            supports_tools: true,
+            supports_vision: true,
             supports_streaming: true,
             aliases: vec![],
         },
@@ -2802,6 +2867,65 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_vision: false,
             supports_streaming: true,
             aliases: vec![],
+        },
+        // ══════════════════════════════════════════════════════════════
+        // Volcano Engine / Doubao (4)
+        // ══════════════════════════════════════════════════════════════
+        ModelCatalogEntry {
+            id: "doubao-seed-1-6-251015".into(),
+            display_name: "Doubao Seed 1.6 Pro".into(),
+            provider: "volcengine".into(),
+            tier: ModelTier::Smart,
+            context_window: 262_144,
+            max_output_tokens: 16_384,
+            input_cost_per_m: 0.80,
+            output_cost_per_m: 2.00,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["doubao".into(), "doubao-pro".into()],
+        },
+        ModelCatalogEntry {
+            id: "doubao-seed-2-0-lite".into(),
+            display_name: "Doubao Seed 2.0 Lite".into(),
+            provider: "volcengine".into(),
+            tier: ModelTier::Balanced,
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+            input_cost_per_m: 0.30,
+            output_cost_per_m: 0.60,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["doubao-lite".into()],
+        },
+        ModelCatalogEntry {
+            id: "doubao-seed-2-0-mini".into(),
+            display_name: "Doubao Seed 2.0 Mini".into(),
+            provider: "volcengine".into(),
+            tier: ModelTier::Fast,
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+            input_cost_per_m: 0.10,
+            output_cost_per_m: 0.10,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["doubao-mini".into()],
+        },
+        ModelCatalogEntry {
+            id: "doubao-seed-code".into(),
+            display_name: "Doubao Seed Code".into(),
+            provider: "volcengine".into(),
+            tier: ModelTier::Smart,
+            context_window: 131_072,
+            max_output_tokens: 16_384,
+            input_cost_per_m: 0.50,
+            output_cost_per_m: 1.00,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["doubao-code".into()],
         },
         // ══════════════════════════════════════════════════════════════
         // AWS Bedrock (8)

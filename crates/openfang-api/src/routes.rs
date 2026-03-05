@@ -297,6 +297,14 @@ pub async fn send_message(
         );
     }
 
+    // Check agent exists before processing
+    if state.kernel.registry.get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
+
     // Resolve file attachments into image content blocks
     if !req.attachments.is_empty() {
         let image_blocks = resolve_attachments(&req.attachments);
@@ -336,8 +344,15 @@ pub async fn send_message(
         }
         Err(e) => {
             tracing::warn!("send_message failed for agent {id}: {e}");
+            let status = if format!("{e}").contains("Agent not found") {
+                StatusCode::NOT_FOUND
+            } else if format!("{e}").contains("quota") || format!("{e}").contains("Quota") {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
             )
         }
@@ -1170,6 +1185,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             ChannelField { key: "bot_token_env", label: "Bot Token", field_type: FieldType::Secret, env_var: Some("DISCORD_BOT_TOKEN"), required: true, placeholder: "MTIz...", advanced: false },
             ChannelField { key: "allowed_guilds", label: "Allowed Guild IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "123456789, 987654321", advanced: true },
+            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "123456789, 987654321", advanced: true },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
             ChannelField { key: "intents", label: "Intents Bitmask", field_type: FieldType::Number, env_var: None, required: false, placeholder: "37376", advanced: true },
         ],
@@ -5341,10 +5357,11 @@ pub async fn list_models(
             true
         })
         .map(|m| {
+            // Custom models from unknown providers are assumed available
             let available = catalog
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status != openfang_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(false);
+                .unwrap_or(m.tier == openfang_types::model_catalog::ModelTier::Custom);
             serde_json::json!({
                 "id": m.id,
                 "display_name": m.display_name,
@@ -5418,7 +5435,7 @@ pub async fn get_model(
             let available = catalog
                 .get_provider(&m.provider)
                 .map(|p| p.auth_status != openfang_types::model_catalog::AuthStatus::Missing)
-                .unwrap_or(false);
+                .unwrap_or(m.tier == openfang_types::model_catalog::ModelTier::Custom);
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
