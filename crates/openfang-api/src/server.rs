@@ -790,8 +790,7 @@ pub async fn run_daemon(
     socket.set_nonblocking(true)?;
     socket.bind(&addr.into())?;
     socket.listen(1024)?;
-    let listener =
-        tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))?;
+    let listener = tokio::net::TcpListener::from_std(std::net::TcpListener::from(socket))?;
 
     // Run server with graceful shutdown.
     // SECURITY: `into_make_service_with_connect_info` injects the peer
@@ -922,11 +921,8 @@ fn is_daemon_responding(addr: &str) -> bool {
         .or_else(|| addr.strip_prefix("https://"))
         .unwrap_or(addr);
     if let Ok(sock_addr) = addr_only.parse::<std::net::SocketAddr>() {
-        std::net::TcpStream::connect_timeout(
-            &sock_addr,
-            std::time::Duration::from_millis(500),
-        )
-        .is_ok()
+        std::net::TcpStream::connect_timeout(&sock_addr, std::time::Duration::from_millis(500))
+            .is_ok()
     } else {
         // Fallback: try connecting to hostname
         std::net::TcpStream::connect(addr_only)

@@ -314,9 +314,13 @@ impl ChannelAdapter for DiscordAdapter {
                                 }
 
                                 "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
-                                    if let Some(msg) =
-                                        parse_discord_message(d, &bot_user_id, &allowed_guilds, &allowed_users)
-                                            .await
+                                    if let Some(msg) = parse_discord_message(
+                                        d,
+                                        &bot_user_id,
+                                        &allowed_guilds,
+                                        &allowed_users,
+                                    )
+                                    .await
                                     {
                                         debug!(
                                             "Discord {event_name} from {}: {:?}",
@@ -512,8 +516,8 @@ async fn parse_discord_message(
             .map(|arr| arr.iter().any(|m| m["id"].as_str() == Some(bid.as_str())))
             .unwrap_or(false);
         // Also check content for <@bot_id> or <@!bot_id> patterns
-        let mentioned_in_content =
-            content_text.contains(&format!("<@{bid}>")) || content_text.contains(&format!("<@!{bid}>"));
+        let mentioned_in_content = content_text.contains(&format!("<@{bid}>"))
+            || content_text.contains(&format!("<@!{bid}>"));
         mentioned_in_array || mentioned_in_content
     } else {
         false
@@ -736,7 +740,8 @@ mod tests {
         });
 
         // Not in allowed users
-        let msg = parse_discord_message(&d, &bot_id, &[], &["user111".into(), "user222".into()]).await;
+        let msg =
+            parse_discord_message(&d, &bot_id, &[], &["user111".into(), "user222".into()]).await;
         assert!(msg.is_none());
 
         // In allowed users
@@ -769,7 +774,10 @@ mod tests {
 
         let msg = parse_discord_message(&d, &bot_id, &[], &[]).await.unwrap();
         assert!(msg.is_group);
-        assert_eq!(msg.metadata.get("was_mentioned").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            msg.metadata.get("was_mentioned").and_then(|v| v.as_bool()),
+            Some(true)
+        );
 
         // Message without mention in group
         let d2 = serde_json::json!({

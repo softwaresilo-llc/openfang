@@ -1137,7 +1137,8 @@ fn classify_streaming_error(err: &openfang_kernel::error::KernelError) -> String
             if inner.contains("localhost:11434") || inner.contains("ollama") {
                 "Model not found on Ollama. Run `ollama pull <model>` to download it, then try again. Use /model to see options.".to_string()
             } else {
-                "Model unavailable. Use /model to see options or check your provider configuration.".to_string()
+                "Model unavailable. Use /model to see options or check your provider configuration."
+                    .to_string()
             }
         }
         llm_errors::LlmErrorCategory::Format => {

@@ -160,7 +160,8 @@ impl LlmDriver for ClaudeCodeDriver {
 
         // Try JSON parse first
         if let Ok(parsed) = serde_json::from_str::<ClaudeJsonOutput>(&stdout) {
-            let text = parsed.result
+            let text = parsed
+                .result
                 .or(parsed.content)
                 .or(parsed.text)
                 .unwrap_or_default();
