@@ -361,7 +361,8 @@ function agentsPage() {
         { id: 'claude-code', display_name: 'Claude Code' },
         { id: 'codex-cli', display_name: 'Codex CLI' },
         { id: 'gemini-cli', display_name: 'Gemini CLI' },
-        { id: 'opencode-cli', display_name: 'OpenCode CLI' }
+        { id: 'opencode-cli', display_name: 'OpenCode CLI' },
+        { id: 'kilocode-cli', display_name: 'KiloCode CLI' }
       ];
     },
 
