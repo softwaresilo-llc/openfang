@@ -49,13 +49,14 @@ impl ModelCatalog {
             // CLI-backed providers use binary/login presence instead of API keys.
             if matches!(
                 provider.id.as_str(),
-                "claude-code" | "codex-cli" | "gemini-cli" | "opencode-cli"
+                "claude-code" | "codex-cli" | "gemini-cli" | "opencode-cli" | "kilocode-cli"
             ) {
                 let available = match provider.id.as_str() {
                     "claude-code" => crate::drivers::claude_code::claude_code_available(),
                     "codex-cli" => crate::drivers::codex_cli::codex_cli_available(),
                     "gemini-cli" => crate::drivers::gemini_cli::gemini_cli_available(),
                     "opencode-cli" => crate::drivers::opencode_cli::opencode_cli_available(),
+                    "kilocode-cli" => crate::drivers::kilocode_cli::kilocode_cli_available(),
                     _ => false,
                 };
                 provider.auth_status = if available {
@@ -686,7 +687,7 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             auth_status: AuthStatus::NotRequired,
             model_count: 0,
         },
-        // ── Codex CLI / Gemini CLI / OpenCode CLI ───────────────────
+        // ── Codex CLI / Gemini CLI / OpenCode CLI / KiloCode CLI ───
         ProviderInfo {
             id: "codex-cli".into(),
             display_name: "Codex CLI".into(),
@@ -708,6 +709,15 @@ fn builtin_providers() -> Vec<ProviderInfo> {
         ProviderInfo {
             id: "opencode-cli".into(),
             display_name: "OpenCode CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "kilocode-cli".into(),
+            display_name: "KiloCode CLI".into(),
             api_key_env: String::new(),
             base_url: String::new(),
             key_required: false,
@@ -790,6 +800,7 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("codex-cli", "codex-cli/default"),
         ("gemini-cli", "gemini-cli/default"),
         ("opencode-cli", "opencode-cli/default"),
+        ("kilocode-cli", "kilocode-cli/default"),
     ];
     pairs
         .into_iter()
@@ -3161,7 +3172,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec!["claude-code-haiku".into()],
         },
         // ══════════════════════════════════════════════════════════════
-        // Generic CLI providers (3)
+        // Generic CLI providers (4)
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
             id: "codex-cli/default".into(),
@@ -3205,6 +3216,20 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_streaming: true,
             aliases: vec!["opencode-cli".into()],
         },
+        ModelCatalogEntry {
+            id: "kilocode-cli/default".into(),
+            display_name: "KiloCode CLI (Default Model)".into(),
+            provider: "kilocode-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["kilocode-cli".into()],
+        },
     ]
 }
 
@@ -3221,7 +3246,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 36);
+        assert_eq!(catalog.list_providers().len(), 37);
     }
 
     #[test]
@@ -3603,6 +3628,14 @@ mod tests {
     }
 
     #[test]
+    fn test_kilocode_cli_provider() {
+        let catalog = ModelCatalog::new();
+        let p = catalog.get_provider("kilocode-cli").unwrap();
+        assert_eq!(p.display_name, "KiloCode CLI");
+        assert!(!p.key_required);
+    }
+
+    #[test]
     fn test_cli_provider_aliases() {
         let catalog = ModelCatalog::new();
         assert_eq!(
@@ -3616,6 +3649,10 @@ mod tests {
         assert_eq!(
             catalog.find_model("opencode-cli").unwrap().id,
             "opencode-cli/default"
+        );
+        assert_eq!(
+            catalog.find_model("kilocode-cli").unwrap().id,
+            "kilocode-cli/default"
         );
     }
 }

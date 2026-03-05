@@ -11,6 +11,7 @@ pub mod copilot;
 pub mod fallback;
 pub mod gemini;
 pub mod gemini_cli;
+pub mod kilocode_cli;
 pub mod openai;
 pub mod opencode_cli;
 
@@ -19,9 +20,9 @@ use openfang_types::model_catalog::{
     AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, COHERE_BASE_URL, DEEPSEEK_BASE_URL,
     FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, LMSTUDIO_BASE_URL,
     MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL,
-    REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
-    XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL, XAI_BASE_URL,
+    ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -157,6 +158,11 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             key_required: false,
         }),
         "opencode-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "kilocode-cli" => Some(ProviderDefaults {
             base_url: "",
             api_key_env: "",
             key_required: false,
@@ -312,6 +318,12 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         return Ok(Arc::new(opencode_cli::OpenCodeCliDriver::new(cli_path)));
     }
 
+    // KiloCode CLI — subprocess-based, no API key required.
+    if provider == "kilocode-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(kilocode_cli::KiloCodeCliDriver::new(cli_path)));
+    }
+
     // GitHub Copilot — wraps OpenAI-compatible driver with automatic token exchange.
     // The CopilotDriver exchanges the GitHub PAT for a Copilot API token on demand,
     // caches it, and refreshes when expired.
@@ -373,8 +385,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, gemini, openai, groq, openrouter, \
                  deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
                  cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-                 codex, claude-code, codex-cli, gemini-cli, opencode-cli. Or set base_url for a \
-                 custom OpenAI-compatible endpoint.",
+                 codex, claude-code, codex-cli, gemini-cli, opencode-cli, kilocode-cli. \
+                 Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -416,6 +428,7 @@ pub fn known_providers() -> &'static [&'static str] {
         "codex-cli",
         "gemini-cli",
         "opencode-cli",
+        "kilocode-cli",
     ]
 }
 
@@ -515,7 +528,8 @@ mod tests {
         assert!(providers.contains(&"codex-cli"));
         assert!(providers.contains(&"gemini-cli"));
         assert!(providers.contains(&"opencode-cli"));
-        assert_eq!(providers.len(), 33);
+        assert!(providers.contains(&"kilocode-cli"));
+        assert_eq!(providers.len(), 34);
     }
 
     #[test]
