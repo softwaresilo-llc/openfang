@@ -82,6 +82,19 @@ function normalizedWaIdNumber(raw) {
     .replace(/[^\d]/g, '');
 }
 
+function resolveRecipientJid(rawTo) {
+  const to = String(rawTo || '').trim();
+  if (!to) throw new Error('Missing recipient identifier');
+  if (to.includes('@')) {
+    return to;
+  }
+  const number = normalizedWaIdNumber(to);
+  if (!number) {
+    throw new Error(`Invalid recipient identifier: ${rawTo}`);
+  }
+  return number + '@s.whatsapp.net';
+}
+
 function isSelfChat(remoteJid) {
   const remoteHost = String(remoteJid || '').split('@')[1] || '';
   const remoteNumber = normalizedWaIdNumber(remoteJid);
@@ -215,8 +228,12 @@ async function startConnection() {
       }
 
       const selfChat = isSelfChat(remoteJid);
-      if (msg.key.fromMe && (!SELF_CHAT_MODE || !selfChat)) {
+      if (msg.key.fromMe && !SELF_CHAT_MODE) {
         continue;
+      }
+      if (msg.key.fromMe && SELF_CHAT_MODE && !selfChat) {
+        // In self-chat mode we also allow messages you send in groups/other chats.
+        // Outbound bot echoes are still filtered via consumeTrackedOutboundMessageId().
       }
 
       const sender = remoteJid;
@@ -281,12 +298,8 @@ async function sendMessage(to, text) {
     throw new Error('WhatsApp not connected');
   }
 
-  // Normalize phone/JID/lid form → JID: "+1234567890" → "1234567890@s.whatsapp.net"
-  const number = normalizedWaIdNumber(to);
-  if (!number) {
-    throw new Error(`Invalid recipient identifier: ${to}`);
-  }
-  const jid = number + '@s.whatsapp.net';
+  // Accept direct JIDs (e.g. groups ending in @g.us) and normalize plain numbers.
+  const jid = resolveRecipientJid(to);
 
   const sent = await sock.sendMessage(jid, { text });
   const sentId = sent?.key?.id;
@@ -319,11 +332,7 @@ async function sendVoiceMessage(to, voiceUrl, ptt = true) {
     throw new Error('Downloaded voice payload is empty');
   }
 
-  const number = normalizedWaIdNumber(to);
-  if (!number) {
-    throw new Error(`Invalid recipient identifier: ${to}`);
-  }
-  const jid = number + '@s.whatsapp.net';
+  const jid = resolveRecipientJid(to);
   const sent = await sock.sendMessage(jid, {
     audio: audioBuffer,
     mimetype: mimeType || 'audio/ogg',

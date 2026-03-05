@@ -1977,6 +1977,15 @@
                                 <template x-if="isDefaultAgentField(f) && !availableAgents.length">
                                   <div class="text-xs text-dim" style="margin-top:4px">No agents found. Create an agent first.</div>
                                 </template>
+                                <template x-if="!isDefaultAgentField(f) && isVoiceTtsProviderField(f)">
+                                  <select class="form-input" x-model="formValues[f.key]">
+                                    <option value="auto">auto</option>
+                                    <option value="local">local</option>
+                                    <option value="groq">groq</option>
+                                    <option value="openai">openai</option>
+                                    <option value="elevenlabs">elevenlabs</option>
+                                  </select>
+                                </template>
                                 <template x-if="!isDefaultAgentField(f) && f.type === 'number'">
                                   <input class="form-input" type="number"
                                          x-model="formValues[f.key]"
@@ -1988,7 +1997,7 @@
                                     <option value="true">true</option>
                                   </select>
                                 </template>
-                                <template x-if="!isDefaultAgentField(f) && (f.type === 'text' || f.type === 'list')">
+                                <template x-if="!isDefaultAgentField(f) && !isVoiceTtsProviderField(f) && (f.type === 'text' || f.type === 'list')">
                                   <input class="form-input" type="text"
                                          x-model="formValues[f.key]"
                                          :placeholder="f.type === 'list' ? f.placeholder + ' (comma-separated)' : f.placeholder">
@@ -2054,6 +2063,15 @@
                         <template x-if="isDefaultAgentField(f) && !availableAgents.length">
                           <div class="text-xs text-dim" style="margin-top:4px">No agents found. Create an agent first.</div>
                         </template>
+                        <template x-if="!isDefaultAgentField(f) && isVoiceTtsProviderField(f)">
+                          <select class="form-input" x-model="formValues[f.key]">
+                            <option value="auto">auto</option>
+                            <option value="local">local</option>
+                            <option value="groq">groq</option>
+                            <option value="openai">openai</option>
+                            <option value="elevenlabs">elevenlabs</option>
+                          </select>
+                        </template>
                         <template x-if="!isDefaultAgentField(f) && f.type === 'number'">
                           <input class="form-input" type="number"
                                  x-model="formValues[f.key]"
@@ -2065,7 +2083,7 @@
                             <option value="true">true</option>
                           </select>
                         </template>
-                        <template x-if="!isDefaultAgentField(f) && (f.type === 'text' || f.type === 'list')">
+                        <template x-if="!isDefaultAgentField(f) && !isVoiceTtsProviderField(f) && (f.type === 'text' || f.type === 'list')">
                           <input class="form-input" type="text"
                                  x-model="formValues[f.key]"
                                  :placeholder="f.type === 'list' ? f.placeholder + ' (comma-separated)' : f.placeholder">
@@ -2101,6 +2119,15 @@
                                 <template x-if="isDefaultAgentField(f) && !availableAgents.length">
                                   <div class="text-xs text-dim" style="margin-top:4px">No agents found. Create an agent first.</div>
                                 </template>
+                                <template x-if="!isDefaultAgentField(f) && isVoiceTtsProviderField(f)">
+                                  <select class="form-input" x-model="formValues[f.key]">
+                                    <option value="auto">auto</option>
+                                    <option value="local">local</option>
+                                    <option value="groq">groq</option>
+                                    <option value="openai">openai</option>
+                                    <option value="elevenlabs">elevenlabs</option>
+                                  </select>
+                                </template>
                                 <template x-if="!isDefaultAgentField(f) && f.type === 'number'">
                                   <input class="form-input" type="number"
                                          x-model="formValues[f.key]"
@@ -2112,7 +2139,7 @@
                                     <option value="true">true</option>
                                   </select>
                                 </template>
-                                <template x-if="!isDefaultAgentField(f) && (f.type === 'text' || f.type === 'list')">
+                                <template x-if="!isDefaultAgentField(f) && !isVoiceTtsProviderField(f) && (f.type === 'text' || f.type === 'list')">
                                   <input class="form-input" type="text"
                                          x-model="formValues[f.key]"
                                          :placeholder="f.type === 'list' ? f.placeholder + ' (comma-separated)' : f.placeholder">

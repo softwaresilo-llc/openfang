@@ -419,16 +419,51 @@ impl MediaEngine {
                 cmd.arg("--language").arg(lang);
             }
 
-            let output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
+            let mut output = tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
                 .await
                 .map_err(|_| {
-                    format!(
-                        "Local STT CLI timed out after {timeout_secs}s (binary: '{bin}')"
-                    )
+                    format!("Local STT CLI timed out after {timeout_secs}s (binary: '{bin}')")
                 })?
                 .map_err(|e| {
                     format!("Failed to start local STT binary '{bin}'. Install OpenAI whisper CLI or set media.audio_local_endpoint. Error: {e}")
                 })?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if should_retry_local_stt_with_cpu(&stderr) {
+                    info!(
+                        "Local STT CLI returned CUDA compatibility error — retrying with CPU device"
+                    );
+                    let mut cpu_cmd = Command::new(bin);
+                    cpu_cmd
+                        .arg(&input_path)
+                        .arg("--model")
+                        .arg(model)
+                        .arg("--output_format")
+                        .arg("txt")
+                        .arg("--output_dir")
+                        .arg(&temp_dir)
+                        .arg("--fp16")
+                        .arg("False")
+                        .arg("--device")
+                        .arg("cpu");
+                    if let Some(lang) = language {
+                        cpu_cmd.arg("--language").arg(lang);
+                    }
+                    cpu_cmd.env("CUDA_VISIBLE_DEVICES", "");
+                    output =
+                        tokio::time::timeout(Duration::from_secs(timeout_secs), cpu_cmd.output())
+                            .await
+                            .map_err(|_| {
+                                format!(
+                                    "Local STT CLI CPU retry timed out after {timeout_secs}s (binary: '{bin}')"
+                                )
+                            })?
+                            .map_err(|e| {
+                                format!("Failed to start local STT binary '{bin}' for CPU retry. Error: {e}")
+                            })?;
+                }
+            }
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -457,6 +492,15 @@ impl MediaEngine {
         let _ = tokio::fs::remove_dir_all(&temp_dir).await;
         result
     }
+}
+
+fn should_retry_local_stt_with_cpu(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("cuda error")
+        || lower.contains("cuda capability")
+        || lower.contains("cudaerrornokernelimagefordevice")
+        || lower.contains("no kernel image is available")
+        || lower.contains("torch.cuda")
 }
 
 /// Detect which vision provider is available based on environment variables.

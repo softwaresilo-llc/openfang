@@ -1007,18 +1007,38 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn synthesize_voice(
         &self,
-        _channel_type: &str,
+        channel_type: &str,
         text: &str,
-        _language: VoiceLanguage,
+        language: VoiceLanguage,
     ) -> Result<Option<VoiceAsset>, String> {
         if !self.kernel.config.tts.enabled {
             return Ok(None);
         }
 
+        let provider_override = if channel_type.eq_ignore_ascii_case("whatsapp") {
+            self.kernel
+                .config
+                .channels
+                .whatsapp
+                .as_ref()
+                .and_then(|cfg| cfg.voice.tts_provider.as_provider_override())
+        } else {
+            None
+        };
+
+        let local_voice_override = if provider_override == Some("local") {
+            Some(match language {
+                VoiceLanguage::De => "de-DE-KatjaNeural",
+                VoiceLanguage::En => "en-US-AriaNeural",
+            })
+        } else {
+            None
+        };
+
         let synthesized = self
             .kernel
             .tts_engine
-            .synthesize(text, None, None)
+            .synthesize_with_provider(provider_override, text, local_voice_override, None)
             .await
             .map_err(|e| format!("Voice synthesis failed: {e}"))?;
 

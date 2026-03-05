@@ -27,6 +27,7 @@ const ROOM_TRANSCRIPT_CONTEXT_LINES: usize = 28;
 const ROOM_TRANSCRIPT_BRIEFING_LINES: usize = 32;
 const ROOM_LINE_MAX_CHARS: usize = 900;
 const AUTO_DISCUSSION_SLEEP_MS: u64 = 1200;
+const ROOM_AGENT_TIMEOUT_SECS: u64 = 90;
 const ROOM_RULE_TAGGED_ONLY: &str =
     "If the user explicitly tags one agent, only that tagged agent should answer.";
 const ROOM_RULE_UNTAGGED_PANEL: &str = "Without a tag, all room panel agents answer.";
@@ -808,10 +809,16 @@ fn build_room_prompt_base(
 
 fn build_room_agent_prompt(state: &ConversationState, agent_name: &str, user_text: &str) -> String {
     let transcript = transcript_tail(state, ROOM_TRANSCRIPT_CONTEXT_LINES);
+    let mut rules = ROOM_PANEL_PROMPT_RULES.to_vec();
+    if state.auto_discussion_enabled {
+        rules.push(
+            "When a human user intervenes during autonomous discussion, address them with @mention and continue naturally.",
+        );
+    }
     build_room_prompt_base(
         agent_name,
         "You are participating in a shared multi-agent room discussion.",
-        &ROOM_PANEL_PROMPT_RULES,
+        &rules,
         &transcript,
         Some(user_text),
     )
@@ -1080,16 +1087,19 @@ async fn run_auto_discussion_loop(
         let prompt = build_auto_discussion_prompt(&state, &agent_name, &participants);
         let conversation_label = format!("room:{}:{}", state.channel, state.room_id);
 
-        match handle
-            .send_message_in_conversation(
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(ROOM_AGENT_TIMEOUT_SECS),
+            handle.send_message_in_conversation(
                 agent_id,
                 &prompt,
                 Some(&conversation_key),
                 Some(&conversation_label),
-            )
-            .await
-        {
-            Ok(response) => {
+            ),
+        )
+        .await;
+
+        match send_result {
+            Ok(Ok(response)) => {
                 if has_visible_text(&response) {
                     push_transcript_line(&mut state, &agent_name, &response);
                     let outbound = format!("[{agent_name}] {response}");
@@ -1121,7 +1131,7 @@ async fn run_auto_discussion_loop(
                     );
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let err_msg = format!("[{agent_name}] Agent error: {e}");
                 push_transcript_line(
                     &mut state,
@@ -1143,6 +1153,34 @@ async fn run_auto_discussion_loop(
                         &reply_user.platform_id,
                         false,
                         Some(&err_msg),
+                    )
+                    .await;
+            }
+            Err(_) => {
+                let timeout_msg = format!(
+                    "[{agent_name}] Agent timed out after {}s.",
+                    ROOM_AGENT_TIMEOUT_SECS
+                );
+                push_transcript_line(
+                    &mut state,
+                    "system",
+                    &format!("{agent_name} timed out after {}s", ROOM_AGENT_TIMEOUT_SECS),
+                );
+                send_response(
+                    adapter.as_ref(),
+                    &reply_user,
+                    timeout_msg.clone(),
+                    thread_id.as_deref(),
+                    output_format,
+                )
+                .await;
+                handle
+                    .record_delivery(
+                        agent_id,
+                        &ct_str,
+                        &reply_user.platform_id,
+                        false,
+                        Some(&timeout_msg),
                     )
                     .await;
             }
@@ -1660,22 +1698,6 @@ async fn dispatch_room_message(
             None => return true,
         };
 
-    if state.auto_discussion_enabled {
-        state.auto_discussion_enabled = false;
-        push_transcript_line(
-            &mut state,
-            "system",
-            "Auto-Discussion paused: user message received.",
-        );
-        state.touch();
-        if let Err(e) = handle.save_conversation_state(state.clone()).await {
-            warn!(
-                "Failed to persist auto-discussion pause for {}: {}",
-                state.conversation_key, e
-            );
-        }
-    }
-
     let agents = handle.list_agents().await.unwrap_or_default();
     if agents.is_empty() {
         send_response(
@@ -1785,16 +1807,19 @@ async fn dispatch_room_message(
     let multi = targets.len() > 1;
     for (agent_id, agent_name) in targets.drain(..) {
         let agent_prompt = build_room_agent_prompt(&state, &agent_name, text);
-        match handle
-            .send_message_in_conversation(
+        let send_result = tokio::time::timeout(
+            Duration::from_secs(ROOM_AGENT_TIMEOUT_SECS),
+            handle.send_message_in_conversation(
                 agent_id,
                 &agent_prompt,
                 Some(&conversation_key),
                 Some(&conversation_label),
-            )
-            .await
-        {
-            Ok(response) => {
+            ),
+        )
+        .await;
+
+        match send_result {
+            Ok(Ok(response)) => {
                 if !has_visible_text(&response) {
                     debug!(
                         agent = %agent_name,
@@ -1824,7 +1849,7 @@ async fn dispatch_room_message(
                     .record_delivery(agent_id, ct_str, &reply_user.platform_id, true, None)
                     .await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 push_transcript_line(
                     &mut state,
                     "system",
@@ -1838,6 +1863,41 @@ async fn dispatch_room_message(
                     );
                 }
                 let err_msg = format!("[{agent_name}] Agent error: {e}");
+                send_response(
+                    adapter,
+                    reply_user,
+                    err_msg.clone(),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                handle
+                    .record_delivery(
+                        agent_id,
+                        ct_str,
+                        &reply_user.platform_id,
+                        false,
+                        Some(&err_msg),
+                    )
+                    .await;
+            }
+            Err(_) => {
+                push_transcript_line(
+                    &mut state,
+                    "system",
+                    &format!("{agent_name} timed out after {}s", ROOM_AGENT_TIMEOUT_SECS),
+                );
+                state.touch();
+                if let Err(save_err) = handle.save_conversation_state(state.clone()).await {
+                    warn!(
+                        "Failed to save room state for {} after timeout: {}",
+                        state.conversation_key, save_err
+                    );
+                }
+                let err_msg = format!(
+                    "[{agent_name}] Agent timed out after {}s.",
+                    ROOM_AGENT_TIMEOUT_SECS
+                );
                 send_response(
                     adapter,
                     reply_user,

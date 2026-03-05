@@ -78,13 +78,50 @@ impl GeminiCliDriver {
 
     /// Extract the first JSON object payload from mixed log + JSON output.
     fn extract_json_payload(output: &str) -> Option<String> {
-        let lines: Vec<&str> = output.lines().collect();
-        for i in 0..lines.len() {
-            if lines[i].trim_start().starts_with('{') {
-                return Some(lines[i..].join("\n"));
+        let bytes = output.as_bytes();
+        let mut start = None;
+        for (idx, b) in bytes.iter().enumerate() {
+            if *b == b'{' {
+                start = Some(idx);
+                break;
             }
         }
-        None
+        let start = start?;
+
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (idx, ch) in output[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if ch == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = start + idx + ch.len_utf8();
+                        return output.get(start..end).map(ToString::to_string);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        output.get(start..).map(ToString::to_string)
     }
 }
 
@@ -177,8 +214,11 @@ impl LlmDriver for GeminiCliDriver {
         let text = if parsed.response.trim().is_empty() {
             stdout
                 .lines()
-                .last()
                 .map(str::trim)
+                .filter(|line| {
+                    !line.is_empty() && *line != "{" && *line != "}" && *line != "[" && *line != "]"
+                })
+                .next_back()
                 .unwrap_or_default()
                 .to_string()
         } else {

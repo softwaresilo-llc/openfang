@@ -105,12 +105,44 @@ impl VoiceLanguage {
     }
 }
 
+/// Preferred TTS backend for channel voice replies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceTtsProvider {
+    /// Use global/default provider auto-detection.
+    #[default]
+    Auto,
+    /// Use Groq OpenAI-compatible speech endpoint.
+    Groq,
+    /// Use local TTS command (edge-tts by default).
+    Local,
+    /// Force OpenAI TTS provider.
+    Openai,
+    /// Force ElevenLabs TTS provider.
+    Elevenlabs,
+}
+
+impl VoiceTtsProvider {
+    /// Return runtime provider override string (None => use default cascade).
+    pub fn as_provider_override(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Groq => Some("groq"),
+            Self::Local => Some("local"),
+            Self::Openai => Some("openai"),
+            Self::Elevenlabs => Some("elevenlabs"),
+        }
+    }
+}
+
 /// Channel voice configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelVoiceConfig {
     /// Voice reply policy.
     pub reply_mode: VoiceReplyMode,
+    /// TTS backend used for synthesized channel replies.
+    pub tts_provider: VoiceTtsProvider,
     /// Default language for synthesized replies.
     pub default_language: VoiceLanguage,
     /// Auto mode threshold: synthesize when reply length >= this value.
@@ -123,6 +155,7 @@ impl Default for ChannelVoiceConfig {
     fn default() -> Self {
         Self {
             reply_mode: VoiceReplyMode::Off,
+            tts_provider: VoiceTtsProvider::Auto,
             default_language: VoiceLanguage::De,
             auto_min_text_length: 120,
             auto_keywords: Vec::new(),
@@ -157,6 +190,8 @@ pub struct ChatRoomsConfig {
     pub respond_without_mention: bool,
     /// Maximum number of agents allowed to respond per room turn.
     pub max_active_agents: usize,
+    /// Maximum autonomous room turns per `/room auto-discussion` run.
+    pub auto_discussion_max_turns: usize,
 }
 
 impl Default for ChatRoomsConfig {
@@ -167,6 +202,7 @@ impl Default for ChatRoomsConfig {
             default_requires_mention: true,
             respond_without_mention: true,
             max_active_agents: 3,
+            auto_discussion_max_turns: 1000,
         }
     }
 }
@@ -3326,6 +3362,13 @@ impl KernelConfig {
         } else if self.chat_rooms.max_active_agents > 16 {
             self.chat_rooms.max_active_agents = 16;
         }
+
+        // Chat room auto-discussion max turns: min 1, max 100_000
+        if self.chat_rooms.auto_discussion_max_turns == 0 {
+            self.chat_rooms.auto_discussion_max_turns = 1000;
+        } else if self.chat_rooms.auto_discussion_max_turns > 100_000 {
+            self.chat_rooms.auto_discussion_max_turns = 100_000;
+        }
     }
 }
 
@@ -3436,6 +3479,7 @@ mod tests {
         assert!(wa.allowed_users.is_empty());
         assert!(!wa.self_chat_mode);
         assert_eq!(wa.voice.reply_mode, VoiceReplyMode::Off);
+        assert_eq!(wa.voice.tts_provider, VoiceTtsProvider::Auto);
         assert_eq!(wa.voice.default_language, VoiceLanguage::De);
     }
 
@@ -3474,12 +3518,14 @@ mod tests {
         assert_eq!(back.phone_number_id, "12345");
         assert!(!back.self_chat_mode);
         assert_eq!(back.voice.reply_mode, VoiceReplyMode::Off);
+        assert_eq!(back.voice.tts_provider, VoiceTtsProvider::Auto);
     }
 
     #[test]
     fn test_whatsapp_voice_config_serde() {
         let cfg = ChannelVoiceConfig {
             reply_mode: VoiceReplyMode::Auto,
+            tts_provider: VoiceTtsProvider::Local,
             default_language: VoiceLanguage::En,
             auto_min_text_length: 80,
             auto_keywords: vec!["status".to_string(), "report".to_string()],
@@ -3487,6 +3533,7 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ChannelVoiceConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.reply_mode, VoiceReplyMode::Auto);
+        assert_eq!(back.tts_provider, VoiceTtsProvider::Local);
         assert_eq!(back.default_language, VoiceLanguage::En);
         assert_eq!(back.auto_min_text_length, 80);
         assert_eq!(back.auto_keywords, vec!["status", "report"]);
@@ -3500,6 +3547,7 @@ mod tests {
         assert!(cfg.default_requires_mention);
         assert!(cfg.respond_without_mention);
         assert_eq!(cfg.max_active_agents, 3);
+        assert_eq!(cfg.auto_discussion_max_turns, 1000);
     }
 
     #[test]
@@ -3510,6 +3558,7 @@ mod tests {
             default_requires_mention: false,
             respond_without_mention: true,
             max_active_agents: 5,
+            auto_discussion_max_turns: 250,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ChatRoomsConfig = serde_json::from_str(&json).unwrap();
@@ -3517,6 +3566,7 @@ mod tests {
         assert!(!back.default_requires_mention);
         assert!(back.respond_without_mention);
         assert_eq!(back.max_active_agents, 5);
+        assert_eq!(back.auto_discussion_max_turns, 250);
     }
 
     #[test]
@@ -3751,6 +3801,18 @@ mod tests {
     }
 
     #[test]
+    fn test_clamp_bounds_chat_room_auto_discussion_max_turns() {
+        let mut config = KernelConfig::default();
+        config.chat_rooms.auto_discussion_max_turns = 0;
+        config.clamp_bounds();
+        assert_eq!(config.chat_rooms.auto_discussion_max_turns, 1000);
+
+        config.chat_rooms.auto_discussion_max_turns = 500_000;
+        config.clamp_bounds();
+        assert_eq!(config.chat_rooms.auto_discussion_max_turns, 100_000);
+    }
+
+    #[test]
     fn test_clamp_bounds_defaults_unchanged() {
         let mut config = KernelConfig::default();
         let browser_timeout = config.browser.timeout_secs;
@@ -3758,11 +3820,16 @@ mod tests {
         let fetch_bytes = config.web.fetch.max_response_bytes;
         let fetch_timeout = config.web.fetch.timeout_secs;
         let max_active_agents = config.chat_rooms.max_active_agents;
+        let auto_discussion_max_turns = config.chat_rooms.auto_discussion_max_turns;
         config.clamp_bounds();
         assert_eq!(config.browser.timeout_secs, browser_timeout);
         assert_eq!(config.browser.max_sessions, browser_sessions);
         assert_eq!(config.web.fetch.max_response_bytes, fetch_bytes);
         assert_eq!(config.web.fetch.timeout_secs, fetch_timeout);
         assert_eq!(config.chat_rooms.max_active_agents, max_active_agents);
+        assert_eq!(
+            config.chat_rooms.auto_discussion_max_turns,
+            auto_discussion_max_turns
+        );
     }
 }

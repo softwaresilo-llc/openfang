@@ -97,6 +97,10 @@ function channelsPage() {
       return !!field && field.key === 'default_agent';
     },
 
+    isVoiceTtsProviderField(field) {
+      return !!field && field.key === 'voice.tts_provider';
+    },
+
     hasAvailableAgent(name) {
       if (!name) return false;
       return this.availableAgents.some(function(agentName) {
@@ -239,6 +243,11 @@ function channelsPage() {
             vals[f.key] = String(f.value);
           }
         });
+      }
+      if (this.setupModal && this.setupModal.name === 'whatsapp') {
+        if (!vals['voice.tts_provider']) {
+          vals['voice.tts_provider'] = 'auto';
+        }
       }
       this.formValues = vals;
       this.showAdvanced = false;

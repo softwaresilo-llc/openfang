@@ -1477,13 +1477,21 @@ impl OpenFangKernel {
                 label: None,
             });
 
+        let model_ctx_window = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&entry.manifest.model.model)
+                .map(|m| m.context_window as usize)
+        });
+
         // Check if auto-compaction is needed: message-count OR token-count trigger
         let needs_compact = {
             use openfang_runtime::compactor::{
                 estimate_token_count, needs_compaction as check_compact,
                 needs_compaction_by_tokens, CompactionConfig,
             };
-            let config = CompactionConfig::default();
+            let mut config = CompactionConfig::default();
+            if let Some(ctx) = model_ctx_window.filter(|ctx| *ctx > 0) {
+                config.context_window_tokens = ctx;
+            }
             let by_messages = check_compact(&session, &config);
             let estimated = estimate_token_count(
                 &session.messages,
@@ -1495,6 +1503,7 @@ impl OpenFangKernel {
                 info!(
                     agent_id = %agent_id,
                     estimated_tokens = estimated,
+                    context_window = config.context_window_tokens,
                     messages = session.messages.len(),
                     "Token-based compaction triggered (messages below threshold but tokens above)"
                 );
@@ -1507,10 +1516,7 @@ impl OpenFangKernel {
         let driver = self.resolve_driver(&entry.manifest)?;
 
         // Look up model's actual context window from the catalog
-        let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
-            cat.find_model(&entry.manifest.model.model)
-                .map(|m| m.context_window as usize)
-        });
+        let ctx_window = model_ctx_window;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
@@ -1771,12 +1777,29 @@ impl OpenFangKernel {
                         use openfang_runtime::compactor::{
                             estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
                         };
-                        let config = CompactionConfig::default();
-                        let estimated = estimate_token_count(&session.messages, None, None);
+                        let mut config = CompactionConfig::default();
+                        if let Some(ctx) = kernel_clone.model_catalog.read().ok().and_then(|cat| {
+                            cat.find_model(&manifest.model.model)
+                                .map(|m| m.context_window as usize)
+                        }) {
+                            if ctx > 0 {
+                                config.context_window_tokens = ctx;
+                            }
+                        }
+                        let estimated = estimate_token_count(
+                            &session.messages,
+                            Some(&manifest.model.system_prompt),
+                            None,
+                        );
                         if needs_compaction_by_tokens(estimated, &config) {
                             let kc = kernel_clone.clone();
                             tokio::spawn(async move {
-                                info!(agent_id = %agent_id, estimated_tokens = estimated, "Post-loop compaction triggered");
+                                info!(
+                                    agent_id = %agent_id,
+                                    estimated_tokens = estimated,
+                                    context_window = config.context_window_tokens,
+                                    "Post-loop compaction triggered"
+                                );
                                 if let Err(e) = kc.compact_agent_session(agent_id).await {
                                     warn!(agent_id = %agent_id, "Post-loop compaction failed: {e}");
                                 }
@@ -2189,6 +2212,47 @@ impl OpenFangKernel {
             message.to_string()
         };
 
+        // Non-streaming path also needs proactive compaction so long-running
+        // room/conversation sessions do not accumulate until hard context failures.
+        {
+            use openfang_runtime::compactor::{
+                estimate_token_count, needs_compaction as check_compact,
+                needs_compaction_by_tokens, CompactionConfig,
+            };
+            let mut config = CompactionConfig::default();
+            if let Some(ctx) = ctx_window.filter(|ctx| *ctx > 0) {
+                config.context_window_tokens = ctx;
+            }
+            let by_messages = check_compact(&session, &config);
+            let estimated = estimate_token_count(
+                &session.messages,
+                Some(&manifest.model.system_prompt),
+                Some(&tools),
+            );
+            let by_tokens = needs_compaction_by_tokens(estimated, &config);
+            if by_messages || by_tokens {
+                info!(
+                    agent_id = %agent_id,
+                    by_messages,
+                    by_tokens,
+                    estimated_tokens = estimated,
+                    context_window = config.context_window_tokens,
+                    "Auto-compacting session (non-streaming)"
+                );
+                match self.compact_agent_session(agent_id).await {
+                    Ok(msg) => {
+                        info!(agent_id = %agent_id, "{msg}");
+                        if let Ok(Some(reloaded)) = self.memory.get_session(session.id) {
+                            session = reloaded;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(agent_id = %agent_id, "Auto-compaction failed (non-streaming): {e}");
+                    }
+                }
+            }
+        }
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -2240,6 +2304,33 @@ impl OpenFangKernel {
             }
             // Append daily memory log (best-effort)
             append_daily_memory_log(workspace, &result.response);
+        }
+
+        // Post-loop token-pressure check to keep long sessions healthy for the next turn.
+        {
+            use openfang_runtime::compactor::{
+                estimate_token_count, needs_compaction_by_tokens, CompactionConfig,
+            };
+            let mut config = CompactionConfig::default();
+            if let Some(ctx) = ctx_window.filter(|ctx| *ctx > 0) {
+                config.context_window_tokens = ctx;
+            }
+            let estimated = estimate_token_count(
+                &session.messages,
+                Some(&manifest.model.system_prompt),
+                Some(&tools),
+            );
+            if needs_compaction_by_tokens(estimated, &config) {
+                info!(
+                    agent_id = %agent_id,
+                    estimated_tokens = estimated,
+                    context_window = config.context_window_tokens,
+                    "Post-loop compaction triggered (non-streaming)"
+                );
+                if let Err(e) = self.compact_agent_session(agent_id).await {
+                    warn!(agent_id = %agent_id, "Post-loop compaction failed (non-streaming): {e}");
+                }
+            }
         }
 
         // Record usage in the metering engine (uses catalog pricing as single source of truth)
@@ -2707,7 +2798,10 @@ impl OpenFangKernel {
     /// Replaces the existing text-truncation compaction with an intelligent
     /// LLM-generated summary of older messages, keeping only recent messages.
     pub async fn compact_agent_session(&self, agent_id: AgentId) -> KernelResult<String> {
-        use openfang_runtime::compactor::{compact_session, needs_compaction, CompactionConfig};
+        use openfang_runtime::compactor::{
+            compact_session, estimate_token_count, needs_compaction, needs_compaction_by_tokens,
+            CompactionConfig,
+        };
 
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::OpenFang(OpenFangError::AgentNotFound(agent_id.to_string()))
@@ -2725,13 +2819,32 @@ impl OpenFangKernel {
                 label: None,
             });
 
-        let config = CompactionConfig::default();
+        let mut config = CompactionConfig::default();
+        if let Some(ctx) = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&entry.manifest.model.model)
+                .map(|m| m.context_window as usize)
+        }) {
+            if ctx > 0 {
+                config.context_window_tokens = ctx;
+            }
+        }
 
-        if !needs_compaction(&session, &config) {
+        let by_messages = needs_compaction(&session, &config);
+        let estimated = estimate_token_count(
+            &session.messages,
+            Some(&entry.manifest.model.system_prompt),
+            None,
+        );
+        let by_tokens = needs_compaction_by_tokens(estimated, &config);
+        if !by_messages && !by_tokens {
+            let threshold =
+                (config.context_window_tokens as f64 * config.token_threshold_ratio) as usize;
             return Ok(format!(
-                "No compaction needed ({} messages, threshold {})",
+                "No compaction needed ({} messages, threshold {}, estimated_tokens {}, token_threshold {}).",
                 session.messages.len(),
-                config.threshold
+                config.threshold,
+                estimated,
+                threshold
             ));
         }
 

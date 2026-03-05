@@ -1200,6 +1200,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         fields: &[
             // Voice behavior (applies to gateway + cloud mode)
             ChannelField { key: "voice.reply_mode", label: "Voice Reply Mode", field_type: FieldType::Text, env_var: None, required: false, placeholder: "off | auto | always", advanced: true },
+            ChannelField { key: "voice.tts_provider", label: "Voice TTS Provider", field_type: FieldType::Text, env_var: None, required: false, placeholder: "auto | local | groq | openai | elevenlabs", advanced: true },
             ChannelField { key: "voice.default_language", label: "Voice Default Language", field_type: FieldType::Text, env_var: None, required: false, placeholder: "de | en", advanced: true },
             ChannelField { key: "voice.auto_min_text_length", label: "Voice Auto Min Text Length", field_type: FieldType::Number, env_var: None, required: false, placeholder: "48", advanced: true },
             ChannelField { key: "voice.auto_keywords", label: "Voice Auto Keywords", field_type: FieldType::List, env_var: None, required: false, placeholder: "voice, audio, sprachnachricht", advanced: true },
@@ -1212,7 +1213,7 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
         ],
         setup_steps: &["Open WhatsApp on your phone", "Go to Linked Devices", "Tap Link a Device and scan the QR code"],
-        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"\nself_chat_mode = false\n\n[channels.whatsapp.voice]\nreply_mode = \"off\"\ndefault_language = \"de\"",
+        config_template: "[channels.whatsapp]\naccess_token_env = \"WHATSAPP_ACCESS_TOKEN\"\nphone_number_id = \"\"\nself_chat_mode = false\n\n[channels.whatsapp.voice]\nreply_mode = \"off\"\ntts_provider = \"auto\"\ndefault_language = \"de\"",
     },
     ChannelMeta {
         name: "signal", display_name: "Signal", icon: "SG",
@@ -4597,6 +4598,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             "default_requires_mention": config.chat_rooms.default_requires_mention,
             "respond_without_mention": config.chat_rooms.respond_without_mention,
             "max_active_agents": config.chat_rooms.max_active_agents,
+            "auto_discussion_max_turns": config.chat_rooms.auto_discussion_max_turns,
         },
     }))
 }
@@ -4797,6 +4799,9 @@ pub async fn agent_budget_status(
                 "limit": quota.max_cost_per_month_usd,
                 "pct": if quota.max_cost_per_month_usd > 0.0 { monthly / quota.max_cost_per_month_usd } else { 0.0 },
             },
+            "tokens": {
+                "limit_per_hour": quota.max_llm_tokens_per_hour,
+            },
         })),
     )
 }
@@ -4819,6 +4824,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
                     "hourly_limit": entry.manifest.resources.max_cost_per_hour_usd,
                     "daily_limit": entry.manifest.resources.max_cost_per_day_usd,
                     "monthly_limit": entry.manifest.resources.max_cost_per_month_usd,
+                    "token_limit_per_hour": entry.manifest.resources.max_llm_tokens_per_hour,
                 }))
             } else {
                 None
@@ -4848,21 +4854,25 @@ pub async fn update_agent_budget(
     let hourly = body["max_cost_per_hour_usd"].as_f64();
     let daily = body["max_cost_per_day_usd"].as_f64();
     let monthly = body["max_cost_per_month_usd"].as_f64();
+    let max_llm_tokens_per_hour = body["max_llm_tokens_per_hour"].as_u64();
 
-    if hourly.is_none() && daily.is_none() && monthly.is_none() {
+    if hourly.is_none() && daily.is_none() && monthly.is_none() && max_llm_tokens_per_hour.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(
-                serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd"}),
+                serde_json::json!({"error": "Provide at least one of: max_cost_per_hour_usd, max_cost_per_day_usd, max_cost_per_month_usd, max_llm_tokens_per_hour"}),
             ),
         );
     }
 
-    match state
-        .kernel
-        .registry
-        .update_resources(agent_id, hourly, daily, monthly)
-    {
+    match state.kernel.registry.update_resources(
+        agent_id,
+        hourly,
+        daily,
+        monthly,
+        max_llm_tokens_per_hour,
+    ) {
         Ok(()) => {
             // Persist updated entry
             if let Some(entry) = state.kernel.registry.get(agent_id) {
@@ -9003,7 +9013,8 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     },
                     "default_requires_mention": "boolean",
                     "respond_without_mention": "boolean",
-                    "max_active_agents": "number"
+                    "max_active_agents": "number",
+                    "auto_discussion_max_turns": "number"
                 }
             },
             "media": {
