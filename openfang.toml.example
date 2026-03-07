@@ -28,6 +28,14 @@ listen_addr = "127.0.0.1:4200"           # OFP listen address
 # Usage tracking display
 # usage_footer = "Full"                   # "Off", "Tokens", "Cost", or "Full"
 
+# Group chat room routing defaults
+# [chat_rooms]
+# enabled = true
+# default_mode = "active"                 # "active", "panel", "orchestrator"
+# default_requires_mention = true
+# respond_without_mention = true
+# max_active_agents = 3                   # hard-clamped to 1..16
+
 # Channel adapters (configure tokens via environment variables)
 # [telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"

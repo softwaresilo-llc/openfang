@@ -57,6 +57,8 @@ pub enum Action {
     KillAgent,
     /// Install a skill.
     InstallSkill,
+    /// Manage group room routing config (/room commands).
+    ManageChatRooms,
     /// View kernel configuration.
     ViewConfig,
     /// Modify kernel configuration.
@@ -77,6 +79,7 @@ impl Action {
             Action::SpawnAgent => UserRole::Admin,
             Action::KillAgent => UserRole::Admin,
             Action::InstallSkill => UserRole::Admin,
+            Action::ManageChatRooms => UserRole::Admin,
             Action::ModifyConfig => UserRole::Owner,
             Action::ManageUsers => UserRole::Owner,
         }
@@ -259,6 +262,9 @@ mod tests {
         assert!(manager.authorize(owner_id, &Action::ChatWithAgent).is_ok());
         assert!(manager.authorize(owner_id, &Action::SpawnAgent).is_ok());
         assert!(manager.authorize(owner_id, &Action::KillAgent).is_ok());
+        assert!(manager
+            .authorize(owner_id, &Action::ManageChatRooms)
+            .is_ok());
         assert!(manager.authorize(owner_id, &Action::ManageUsers).is_ok());
         assert!(manager.authorize(owner_id, &Action::ModifyConfig).is_ok());
     }
@@ -275,6 +281,9 @@ mod tests {
         // User cannot spawn/kill/manage
         assert!(manager.authorize(guest_id, &Action::SpawnAgent).is_err());
         assert!(manager.authorize(guest_id, &Action::KillAgent).is_err());
+        assert!(manager
+            .authorize(guest_id, &Action::ManageChatRooms)
+            .is_err());
         assert!(manager.authorize(guest_id, &Action::ManageUsers).is_err());
     }
 

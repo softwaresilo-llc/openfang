@@ -3,7 +3,8 @@
 //! Implements `ChannelBridgeHandle` on `OpenFangKernel` and provides the
 //! `start_channel_bridge()` entry point called by the daemon.
 
-use openfang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
+use dashmap::DashMap;
+use openfang_channels::bridge::{BridgeManager, ChannelBridgeHandle, ConversationState};
 use openfang_channels::discord::DiscordAdapter;
 use openfang_channels::email::EmailAdapter;
 use openfang_channels::google_chat::GoogleChatAdapter;
@@ -51,7 +52,9 @@ use openfang_channels::mumble::MumbleAdapter;
 use openfang_channels::ntfy::NtfyAdapter;
 use openfang_channels::webhook::WebhookAdapter;
 use openfang_kernel::OpenFangKernel;
-use openfang_types::agent::AgentId;
+use openfang_types::agent::{AgentId, SessionId};
+use openfang_types::config::ChatRoomsConfig;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -60,6 +63,68 @@ use tracing::{error, info, warn};
 pub struct KernelBridgeAdapter {
     kernel: Arc<OpenFangKernel>,
     started_at: Instant,
+    agent_session_locks: DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+}
+
+const CHAT_ROOM_STATES_KEY: &str = "__openfang_chat_room_states_v1";
+const CHAT_ROOM_SESSION_MAP_KEY: &str = "__openfang_chat_room_sessions_v1";
+
+fn chat_rooms_shared_agent_id() -> AgentId {
+    AgentId(uuid::Uuid::from_bytes([
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x02,
+    ]))
+}
+
+fn load_room_states(kernel: &OpenFangKernel) -> HashMap<String, ConversationState> {
+    let shared_id = chat_rooms_shared_agent_id();
+    match kernel
+        .memory
+        .structured_get(shared_id, CHAT_ROOM_STATES_KEY)
+    {
+        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_default(),
+        _ => HashMap::new(),
+    }
+}
+
+fn save_room_states(
+    kernel: &OpenFangKernel,
+    states: &HashMap<String, ConversationState>,
+) -> Result<(), String> {
+    let shared_id = chat_rooms_shared_agent_id();
+    let value = serde_json::to_value(states).map_err(|e| format!("Serialize room states: {e}"))?;
+    kernel
+        .memory
+        .structured_set(shared_id, CHAT_ROOM_STATES_KEY, value)
+        .map_err(|e| format!("Persist room states: {e}"))
+}
+
+fn load_room_session_map(kernel: &OpenFangKernel) -> HashMap<String, String> {
+    let shared_id = chat_rooms_shared_agent_id();
+    match kernel
+        .memory
+        .structured_get(shared_id, CHAT_ROOM_SESSION_MAP_KEY)
+    {
+        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_default(),
+        _ => HashMap::new(),
+    }
+}
+
+fn save_room_session_map(
+    kernel: &OpenFangKernel,
+    map: &HashMap<String, String>,
+) -> Result<(), String> {
+    let shared_id = chat_rooms_shared_agent_id();
+    let value =
+        serde_json::to_value(map).map_err(|e| format!("Serialize room session map: {e}"))?;
+    kernel
+        .memory
+        .structured_set(shared_id, CHAT_ROOM_SESSION_MAP_KEY, value)
+        .map_err(|e| format!("Persist room session map: {e}"))
+}
+
+fn room_session_key(conversation_key: &str, agent_id: AgentId) -> String {
+    format!("{conversation_key}|{}", agent_id)
 }
 
 #[async_trait]
@@ -73,8 +138,85 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(result.response)
     }
 
+    async fn send_message_in_conversation(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        conversation_key: Option<&str>,
+        conversation_label: Option<&str>,
+    ) -> Result<String, String> {
+        let Some(conversation_key) = conversation_key else {
+            return self.send_message(agent_id, message).await;
+        };
+
+        let lock = self
+            .agent_session_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        let map_key = room_session_key(conversation_key, agent_id);
+        let mut session_map = load_room_session_map(self.kernel.as_ref());
+        let mut target_session = session_map.get(&map_key).cloned();
+
+        if let Some(session_id_str) = target_session.clone() {
+            match uuid::Uuid::parse_str(&session_id_str) {
+                Ok(uuid) => {
+                    let session_id = SessionId(uuid);
+                    if let Err(e) = self.kernel.switch_agent_session(agent_id, session_id) {
+                        warn!(
+                            agent_id = %agent_id,
+                            conversation_key = %conversation_key,
+                            "Switch to room session failed: {e}"
+                        );
+                        target_session = None;
+                    }
+                }
+                Err(_) => {
+                    target_session = None;
+                }
+            }
+        }
+
+        if target_session.is_none() {
+            let label = conversation_label.unwrap_or(conversation_key);
+            let created = self
+                .kernel
+                .create_agent_session(agent_id, Some(label))
+                .map_err(|e| format!("{e}"))?;
+            let session_id = created
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "Missing session_id from create_agent_session".to_string())?
+                .to_string();
+            session_map.insert(map_key, session_id);
+            save_room_session_map(self.kernel.as_ref(), &session_map)?;
+        }
+
+        self.send_message(agent_id, message).await
+    }
+
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
         Ok(self.kernel.registry.find_by_name(name).map(|e| e.id))
+    }
+
+    async fn chat_rooms_config(&self) -> ChatRoomsConfig {
+        self.kernel.config.chat_rooms.clone()
+    }
+
+    async fn get_conversation_state(
+        &self,
+        conversation_key: &str,
+    ) -> Result<Option<ConversationState>, String> {
+        let states = load_room_states(self.kernel.as_ref());
+        Ok(states.get(conversation_key).cloned())
+    }
+
+    async fn save_conversation_state(&self, state: ConversationState) -> Result<(), String> {
+        let mut states = load_room_states(self.kernel.as_ref());
+        states.insert(state.conversation_key.clone(), state);
+        save_room_states(self.kernel.as_ref(), &states)
     }
 
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
@@ -758,6 +900,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "spawn" => openfang_kernel::auth::Action::SpawnAgent,
             "kill" => openfang_kernel::auth::Action::KillAgent,
             "install_skill" => openfang_kernel::auth::Action::InstallSkill,
+            "manage_rooms" => openfang_kernel::auth::Action::ManageChatRooms,
             _ => openfang_kernel::auth::Action::ChatWithAgent,
         };
 
@@ -1017,6 +1160,7 @@ pub async fn start_channel_bridge_with_config(
     let handle = KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        agent_session_locks: DashMap::new(),
     };
 
     // Collect all adapters to start
@@ -1065,7 +1209,9 @@ pub async fn start_channel_bridge_with_config(
     // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
     if let Some(ref wa_config) = config.whatsapp {
         let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
-        let gateway_url = std::env::var(&wa_config.gateway_url_env).ok().filter(|u| !u.is_empty());
+        let gateway_url = std::env::var(&wa_config.gateway_url_env)
+            .ok()
+            .filter(|u| !u.is_empty());
 
         if cloud_token.is_some() || gateway_url.is_some() {
             let token = cloud_token.unwrap_or_default();
@@ -1574,6 +1720,7 @@ pub async fn start_channel_bridge_with_config(
     let bridge_handle: Arc<dyn ChannelBridgeHandle> = Arc::new(KernelBridgeAdapter {
         kernel: kernel.clone(),
         started_at: Instant::now(),
+        agent_session_locks: DashMap::new(),
     });
     let router = Arc::new(router);
     let mut manager = BridgeManager::new(bridge_handle, router);

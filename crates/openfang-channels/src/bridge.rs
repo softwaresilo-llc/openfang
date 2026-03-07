@@ -10,11 +10,30 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::StreamExt;
 use openfang_types::agent::AgentId;
-use openfang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
+use openfang_types::config::{
+    ChannelOverrides, ChatRoomMode, ChatRoomsConfig, DmPolicy, GroupPolicy, OutputFormat,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
+
+const ROOM_TRANSCRIPT_MAX_LINES: usize = 80;
+const ROOM_TRANSCRIPT_MAX_CHARS: usize = 24_000;
+const ROOM_TRANSCRIPT_CONTEXT_LINES: usize = 24;
+const ROOM_LINE_MAX_CHARS: usize = 900;
+const ROOM_RULE_TAGGED_ONLY: &str =
+    "If the user explicitly tags one agent, only that tagged agent should answer.";
+const ROOM_RULE_UNTAGGED_PANEL: &str = "Without a tag, all room panel agents answer.";
+const ROOM_RULE_CONCISE_ADDITIVE: &str =
+    "Keep your reply concise, additive, and avoid repeating points already covered.";
+const ROOM_PANEL_PROMPT_RULES: [&str; 3] = [
+    ROOM_RULE_TAGGED_ONLY,
+    ROOM_RULE_UNTAGGED_PANEL,
+    ROOM_RULE_CONCISE_ADDITIVE,
+];
 
 /// Kernel operations needed by channel adapters.
 ///
@@ -110,6 +129,35 @@ pub trait ChannelBridgeHandle: Send + Sync {
         None
     }
 
+    /// Return global chat-room routing defaults.
+    async fn chat_rooms_config(&self) -> ChatRoomsConfig {
+        ChatRoomsConfig::default()
+    }
+
+    /// Load persisted state for one conversation room.
+    async fn get_conversation_state(
+        &self,
+        _conversation_key: &str,
+    ) -> Result<Option<ConversationState>, String> {
+        Ok(None)
+    }
+
+    /// Persist conversation room state.
+    async fn save_conversation_state(&self, _state: ConversationState) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Send a message in a conversation-scoped session (falls back to default send).
+    async fn send_message_in_conversation(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        _conversation_key: Option<&str>,
+        _conversation_label: Option<&str>,
+    ) -> Result<String, String> {
+        self.send_message(agent_id, message).await
+    }
+
     /// Record a delivery result for tracking (optional — default no-op).
     async fn record_delivery(
         &self,
@@ -195,6 +243,76 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// List discovered external A2A agents.
     async fn a2a_agents_text(&self) -> String {
         "A2A agents not available.".to_string()
+    }
+}
+
+/// Persisted routing state for one external conversation room/thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConversationState {
+    /// Stable conversation key (`channel:room[:thread]`).
+    pub conversation_key: String,
+    /// Channel type string (`telegram`, `whatsapp`, ...).
+    pub channel: String,
+    /// External room/chat identifier.
+    pub room_id: String,
+    /// Current room routing mode.
+    pub mode: ChatRoomMode,
+    /// Active agent name for active/orchestrator modes.
+    pub active_agent: Option<String>,
+    /// Panel agent names (used in panel mode).
+    pub panel_agents: Vec<String>,
+    /// Whether replies require explicit @mention.
+    pub requires_mention: bool,
+    /// In panel mode, reply with all panel agents when no mention exists.
+    pub respond_without_mention: bool,
+    /// Shared room transcript lines (user, agent, and system events).
+    pub transcript: Vec<String>,
+    /// Last update timestamp (RFC3339 UTC).
+    pub updated_at: String,
+}
+
+impl Default for ConversationState {
+    fn default() -> Self {
+        Self {
+            conversation_key: String::new(),
+            channel: String::new(),
+            room_id: String::new(),
+            mode: ChatRoomMode::Active,
+            active_agent: None,
+            panel_agents: Vec::new(),
+            requires_mention: true,
+            respond_without_mention: true,
+            transcript: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+impl ConversationState {
+    /// Build a fresh room state from global defaults.
+    pub fn with_defaults(
+        conversation_key: String,
+        channel: String,
+        room_id: String,
+        defaults: &ChatRoomsConfig,
+    ) -> Self {
+        Self {
+            conversation_key,
+            channel,
+            room_id,
+            mode: defaults.default_mode,
+            active_agent: None,
+            panel_agents: Vec::new(),
+            requires_mention: defaults.default_requires_mention,
+            respond_without_mention: defaults.respond_without_mention,
+            transcript: Vec::new(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn touch(&mut self) {
+        self.updated_at = chrono::Utc::now().to_rfc3339();
     }
 }
 
@@ -359,6 +477,592 @@ async fn send_response(
     }
 }
 
+fn conversation_room_id(message: &ChannelMessage) -> String {
+    const CANDIDATE_KEYS: &[&str] = &[
+        "chat_id",
+        "channel_id",
+        "room_id",
+        "conversation_id",
+        "group_id",
+        "thread_root_id",
+    ];
+
+    for key in CANDIDATE_KEYS {
+        if let Some(value) = message.metadata.get(*key).and_then(|v| v.as_str()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+
+    message.sender.platform_id.clone()
+}
+
+fn conversation_key_for_message(message: &ChannelMessage) -> Option<String> {
+    if !message.is_group {
+        return None;
+    }
+
+    let channel = channel_type_str(&message.channel);
+    let room_id = conversation_room_id(message);
+    if let Some(thread_id) = message.thread_id.as_deref() {
+        if !thread_id.trim().is_empty() {
+            return Some(format!("{channel}:{room_id}:thread:{thread_id}"));
+        }
+    }
+    Some(format!("{channel}:{room_id}"))
+}
+
+fn normalize_agent_token(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    out
+}
+
+fn normalize_transcript_text(text: &str) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(compact.trim(), ROOM_LINE_MAX_CHARS)
+}
+
+fn trim_transcript(state: &mut ConversationState) {
+    while state.transcript.len() > ROOM_TRANSCRIPT_MAX_LINES {
+        state.transcript.remove(0);
+    }
+    let mut total_chars: usize = state
+        .transcript
+        .iter()
+        .map(|line| line.chars().count())
+        .sum();
+    while total_chars > ROOM_TRANSCRIPT_MAX_CHARS && !state.transcript.is_empty() {
+        let removed = state.transcript.remove(0);
+        total_chars = total_chars.saturating_sub(removed.chars().count());
+    }
+}
+
+fn push_transcript_line(state: &mut ConversationState, speaker: &str, text: &str) {
+    let normalized = normalize_transcript_text(text);
+    if normalized.is_empty() {
+        return;
+    }
+    state.transcript.push(format!("{speaker}: {normalized}"));
+    trim_transcript(state);
+}
+
+fn transcript_tail(state: &ConversationState, max_lines: usize) -> String {
+    let len = state.transcript.len();
+    let start = len.saturating_sub(max_lines);
+    state.transcript[start..].join("\n")
+}
+
+fn build_room_agent_prompt(state: &ConversationState, agent_name: &str, user_text: &str) -> String {
+    let transcript = transcript_tail(state, ROOM_TRANSCRIPT_CONTEXT_LINES);
+    let rules_block = ROOM_PANEL_PROMPT_RULES
+        .iter()
+        .map(|rule| format!("- {rule}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if transcript.trim().is_empty() {
+        return format!(
+            "You are participating in a shared multi-agent room discussion.\n\
+             Your name in this room is \"{agent_name}\".\n\
+             Rules:\n{rules_block}\n\n\
+             Current user message:\n{user_text}"
+        );
+    }
+
+    format!(
+        "You are participating in a shared multi-agent room discussion.\n\
+         Your name in this room is \"{agent_name}\".\n\
+         Rules:\n{rules_block}\n\n\
+         Shared room transcript (most recent entries):\n{transcript}\n\n\
+         Current user message:\n{user_text}"
+    )
+}
+
+fn chat_room_mode_label(mode: ChatRoomMode) -> &'static str {
+    match mode {
+        ChatRoomMode::Active => "active",
+        ChatRoomMode::Panel => "panel",
+        ChatRoomMode::Orchestrator => "orchestrator",
+    }
+}
+
+fn extract_mentioned_agent_names(text: &str, agents: &[(AgentId, String)]) -> Vec<String> {
+    let mut token_to_agent = HashMap::new();
+    for (_, name) in agents {
+        let variants = [
+            normalize_agent_token(name),
+            normalize_agent_token(&name.replace(' ', "-")),
+            normalize_agent_token(&name.replace(' ', "_")),
+            normalize_agent_token(&name.replace(' ', "")),
+        ];
+        for variant in variants {
+            if !variant.is_empty() {
+                token_to_agent.insert(variant, name.clone());
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in text.split_whitespace() {
+        if !raw.starts_with('@') || raw.len() <= 1 {
+            continue;
+        }
+        let trimmed = raw
+            .trim_start_matches('@')
+            .trim_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+            .to_lowercase();
+        if let Some(name) = token_to_agent.get(&trimmed) {
+            if seen.insert(name.clone()) {
+                out.push(name.clone());
+            }
+        }
+    }
+    out
+}
+
+fn select_active_agent_name(
+    state: &ConversationState,
+    router: &Arc<AgentRouter>,
+    message: &ChannelMessage,
+    agents: &[(AgentId, String)],
+) -> Option<String> {
+    if let Some(name) = state.active_agent.as_ref() {
+        if agents.iter().any(|(_, n)| n == name) {
+            return Some(name.clone());
+        }
+    }
+
+    let fallback_id = router.resolve(
+        &message.channel,
+        &message.sender.platform_id,
+        message.sender.openfang_user.as_deref(),
+    )?;
+    agents
+        .iter()
+        .find(|(id, _)| *id == fallback_id)
+        .map(|(_, name)| name.clone())
+}
+
+async fn ensure_room_state(
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+    message: &ChannelMessage,
+    conversation_key: &str,
+    room_defaults: &ChatRoomsConfig,
+) -> Option<ConversationState> {
+    let channel = channel_type_str(&message.channel).to_string();
+    let room_id = conversation_room_id(message);
+
+    let mut state = match handle.get_conversation_state(conversation_key).await {
+        Ok(Some(existing)) => existing,
+        Ok(None) => ConversationState::with_defaults(
+            conversation_key.to_string(),
+            channel,
+            room_id,
+            room_defaults,
+        ),
+        Err(e) => {
+            warn!("Failed loading room state for {conversation_key}: {e}");
+            ConversationState::with_defaults(
+                conversation_key.to_string(),
+                channel,
+                room_id,
+                room_defaults,
+            )
+        }
+    };
+
+    if state.active_agent.is_none() {
+        let running_agents = handle.list_agents().await.unwrap_or_default();
+        state.active_agent = select_active_agent_name(&state, router, message, &running_agents);
+    }
+
+    Some(state)
+}
+
+async fn handle_room_command(
+    args: &[String],
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+    message: &ChannelMessage,
+    room_defaults: &ChatRoomsConfig,
+) -> String {
+    let conversation_key = match conversation_key_for_message(message) {
+        Some(k) => k,
+        None => return "Room commands are only available in group chats.".to_string(),
+    };
+
+    if let Err(denied) = handle
+        .authorize_channel_user(
+            channel_type_str(&message.channel),
+            &message.sender.platform_id,
+            "manage_rooms",
+        )
+        .await
+    {
+        return format!("Access denied: {denied}");
+    }
+
+    let mut state =
+        match ensure_room_state(handle, router, message, &conversation_key, room_defaults).await {
+            Some(s) => s,
+            None => return "Failed to initialize room state.".to_string(),
+        };
+
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("status");
+    match sub {
+        "status" => {
+            let active = state.active_agent.as_deref().unwrap_or("(none)");
+            let panel = if state.panel_agents.is_empty() {
+                "(empty)".to_string()
+            } else {
+                state.panel_agents.join(", ")
+            };
+            format!(
+                "Room state\nkey: {}\nmode: {}\nactive: {}\npanel: {}\nrequires_mention: {}\nrespond_without_mention: {}\ntranscript_lines: {}",
+                state.conversation_key,
+                chat_room_mode_label(state.mode),
+                active,
+                panel,
+                state.requires_mention,
+                state.respond_without_mention,
+                state.transcript.len(),
+            )
+        }
+        "mode" => {
+            let mode_arg = match args.get(1) {
+                Some(v) => v.as_str(),
+                None => return "Usage: /room mode <active|panel|orchestrator>".to_string(),
+            };
+            state.mode = match mode_arg {
+                "active" => ChatRoomMode::Active,
+                "panel" => ChatRoomMode::Panel,
+                "orchestrator" => ChatRoomMode::Orchestrator,
+                _ => return "Unknown mode. Use active, panel, or orchestrator.".to_string(),
+            };
+            state.touch();
+            if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                return format!("Failed to save room mode: {e}");
+            }
+            format!("Room mode set to {mode_arg}")
+        }
+        "active" => {
+            let agent_name = match args.get(1) {
+                Some(_) => args[1..].join(" "),
+                None => return "Usage: /room active <agent-name>".to_string(),
+            };
+            let agent_name = agent_name.trim();
+            match handle.find_agent_by_name(agent_name).await {
+                Ok(Some(_)) => {
+                    state.active_agent = Some(agent_name.to_string());
+                    state.touch();
+                    if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                        return format!("Failed to save active agent: {e}");
+                    }
+                    format!("Room active agent set to {agent_name}")
+                }
+                Ok(None) => format!("Unknown agent: {agent_name}"),
+                Err(e) => format!("Failed to resolve agent: {e}"),
+            }
+        }
+        "panel" => {
+            let action = args.get(1).map(|s| s.as_str()).unwrap_or("");
+            match action {
+                "add" => {
+                    let agent_name = match args.get(2) {
+                        Some(_) => args[2..].join(" "),
+                        None => return "Usage: /room panel add <agent-name>".to_string(),
+                    };
+                    let agent_name = agent_name.trim();
+                    match handle.find_agent_by_name(agent_name).await {
+                        Ok(Some(_)) => {
+                            if !state.panel_agents.iter().any(|a| a == agent_name) {
+                                state.panel_agents.push(agent_name.to_string());
+                            }
+                            if state.panel_agents.len() > room_defaults.max_active_agents {
+                                state.panel_agents.truncate(room_defaults.max_active_agents);
+                            }
+                            state.touch();
+                            if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                                return format!("Failed to update panel: {e}");
+                            }
+                            format!("Added {agent_name} to room panel")
+                        }
+                        Ok(None) => format!("Unknown agent: {agent_name}"),
+                        Err(e) => format!("Failed to resolve agent: {e}"),
+                    }
+                }
+                "remove" => {
+                    let agent_name = match args.get(2) {
+                        Some(_) => args[2..].join(" "),
+                        None => return "Usage: /room panel remove <agent-name>".to_string(),
+                    };
+                    let agent_name = agent_name.trim();
+                    state.panel_agents.retain(|a| a != agent_name);
+                    state.touch();
+                    if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                        return format!("Failed to update panel: {e}");
+                    }
+                    format!("Removed {agent_name} from room panel")
+                }
+                "clear" => {
+                    state.panel_agents.clear();
+                    state.touch();
+                    if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                        return format!("Failed to clear panel: {e}");
+                    }
+                    "Room panel cleared".to_string()
+                }
+                _ => "Usage: /room panel <add|remove|clear> [agent-name]".to_string(),
+            }
+        }
+        "mention" => {
+            let on = match args.get(1).map(|s| s.as_str()) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return "Usage: /room mention <on|off>".to_string(),
+            };
+            state.requires_mention = on;
+            state.touch();
+            if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                return format!("Failed to save mention policy: {e}");
+            }
+            format!("Room mention requirement set to {}", if on { "on" } else { "off" })
+        }
+        "fallback" => {
+            let on = match args.get(1).map(|s| s.as_str()) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => return "Usage: /room fallback <on|off>".to_string(),
+            };
+            state.respond_without_mention = on;
+            state.touch();
+            if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                return format!("Failed to save fallback policy: {e}");
+            }
+            format!(
+                "Room no-mention panel replies set to {}",
+                if on { "on" } else { "off" }
+            )
+        }
+        _ => {
+            "Room commands:\n/room status\n/room mode <active|panel|orchestrator>\n/room active <agent>\n/room panel <add|remove|clear> [agent]\n/room mention <on|off>\n/room fallback <on|off>"
+                .to_string()
+        }
+    }
+}
+
+async fn dispatch_group_room_message(
+    message: &ChannelMessage,
+    text: &str,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+    adapter: &dyn ChannelAdapter,
+    ct_str: &str,
+    thread_id: Option<&str>,
+    output_format: OutputFormat,
+    room_defaults: &ChatRoomsConfig,
+) -> bool {
+    if !message.is_group || !room_defaults.enabled {
+        return false;
+    }
+
+    let conversation_key = match conversation_key_for_message(message) {
+        Some(k) => k,
+        None => return false,
+    };
+
+    let mut state =
+        match ensure_room_state(handle, router, message, &conversation_key, room_defaults).await {
+            Some(s) => s,
+            None => return true,
+        };
+
+    let agents = handle.list_agents().await.unwrap_or_default();
+    if agents.is_empty() {
+        send_response(
+            adapter,
+            &message.sender,
+            "No agents running.".to_string(),
+            thread_id,
+            output_format,
+        )
+        .await;
+        return true;
+    }
+
+    let mentioned_names = extract_mentioned_agent_names(text, &agents);
+    let mut target_names: Vec<String> = Vec::new();
+
+    match state.mode {
+        ChatRoomMode::Active | ChatRoomMode::Orchestrator => {
+            if let Some(first) = mentioned_names.first() {
+                state.active_agent = Some(first.clone());
+                target_names.push(first.clone());
+            } else if state.requires_mention {
+                return true;
+            } else if let Some(active) = select_active_agent_name(&state, router, message, &agents)
+            {
+                state.active_agent = Some(active.clone());
+                target_names.push(active);
+            }
+        }
+        ChatRoomMode::Panel => {
+            if !mentioned_names.is_empty() {
+                target_names.extend(mentioned_names);
+            } else if state.respond_without_mention {
+                target_names.extend(state.panel_agents.iter().cloned());
+            } else if state.requires_mention {
+                return true;
+            }
+
+            if target_names.is_empty() {
+                if let Some(active) = select_active_agent_name(&state, router, message, &agents) {
+                    state.active_agent = Some(active.clone());
+                    target_names.push(active);
+                }
+            }
+        }
+    }
+
+    if target_names.is_empty() {
+        send_response(
+            adapter,
+            &message.sender,
+            "No target agent selected for this room. Use /room active <agent> or /room panel add <agent>."
+                .to_string(),
+            thread_id,
+            output_format,
+        )
+        .await;
+        return true;
+    }
+
+    let mut seen = HashSet::new();
+    target_names.retain(|name| seen.insert(name.clone()));
+    target_names.truncate(room_defaults.max_active_agents.max(1));
+
+    let id_by_name: HashMap<String, AgentId> = agents
+        .iter()
+        .map(|(id, name)| (name.clone(), *id))
+        .collect();
+    let mut targets: Vec<(AgentId, String)> = target_names
+        .into_iter()
+        .filter_map(|name| id_by_name.get(&name).copied().map(|id| (id, name)))
+        .collect();
+
+    if targets.is_empty() {
+        send_response(
+            adapter,
+            &message.sender,
+            "None of the selected room agents are currently running.".to_string(),
+            thread_id,
+            output_format,
+        )
+        .await;
+        return true;
+    }
+
+    if let Some((_, first_name)) = targets.first() {
+        state.active_agent = Some(first_name.clone());
+    }
+    let user_name = if message.sender.display_name.trim().is_empty() {
+        "user"
+    } else {
+        message.sender.display_name.as_str()
+    };
+    push_transcript_line(&mut state, &format!("user[{user_name}]"), text);
+    state.touch();
+    if let Err(e) = handle.save_conversation_state(state.clone()).await {
+        warn!(
+            "Failed to save room state for {}: {}",
+            state.conversation_key, e
+        );
+    }
+
+    let _ = adapter.send_typing(&message.sender).await;
+    let conversation_label = format!("room:{}:{}", state.channel, state.room_id);
+    let multi = targets.len() > 1;
+    for (agent_id, agent_name) in targets.drain(..) {
+        let agent_prompt = build_room_agent_prompt(&state, &agent_name, text);
+        match handle
+            .send_message_in_conversation(
+                agent_id,
+                &agent_prompt,
+                Some(&conversation_key),
+                Some(&conversation_label),
+            )
+            .await
+        {
+            Ok(response) => {
+                push_transcript_line(&mut state, &agent_name, &response);
+                state.touch();
+                if let Err(e) = handle.save_conversation_state(state.clone()).await {
+                    warn!(
+                        "Failed to save room state for {} after response: {}",
+                        state.conversation_key, e
+                    );
+                }
+                let outbound = if multi {
+                    format!("[{agent_name}] {response}")
+                } else {
+                    response
+                };
+                send_response(adapter, &message.sender, outbound, thread_id, output_format).await;
+                handle
+                    .record_delivery(agent_id, ct_str, &message.sender.platform_id, true, None)
+                    .await;
+            }
+            Err(e) => {
+                push_transcript_line(
+                    &mut state,
+                    "system",
+                    &format!("{agent_name} failed to answer: {e}"),
+                );
+                state.touch();
+                if let Err(save_err) = handle.save_conversation_state(state.clone()).await {
+                    warn!(
+                        "Failed to save room state for {} after error: {}",
+                        state.conversation_key, save_err
+                    );
+                }
+                let err_msg = format!("[{agent_name}] Agent error: {e}");
+                send_response(
+                    adapter,
+                    &message.sender,
+                    err_msg.clone(),
+                    thread_id,
+                    output_format,
+                )
+                .await;
+                handle
+                    .record_delivery(
+                        agent_id,
+                        ct_str,
+                        &message.sender.platform_id,
+                        false,
+                        Some(&err_msg),
+                    )
+                    .await;
+            }
+        }
+    }
+    true
+}
+
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
@@ -408,7 +1112,9 @@ async fn dispatch_message(
                 }
                 GroupPolicy::MentionOnly => {
                     // Only allow messages where the bot was @mentioned or commands.
-                    let was_mentioned = message.metadata.get("was_mentioned")
+                    let was_mentioned = message
+                        .metadata
+                        .get("was_mentioned")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let is_command = matches!(&message.content, ChannelContent::Command { .. });
@@ -446,24 +1152,39 @@ async fn dispatch_message(
         }
     }
 
+    let room_defaults = handle.chat_rooms_config().await;
+
     let text = match &message.content {
         ChannelContent::Text(t) => t.clone(),
         ChannelContent::Command { name, args } => {
-            let result = handle_command(name, args, handle, router, &message.sender).await;
+            let result = if name == "room" {
+                handle_room_command(args, handle, router, message, &room_defaults).await
+            } else {
+                handle_command(name, args, handle, router, &message.sender).await
+            };
             send_response(adapter, &message.sender, result, thread_id, output_format).await;
             return;
         }
-        ChannelContent::Image { ref url, ref caption } => {
+        ChannelContent::Image {
+            ref url,
+            ref caption,
+        } => {
             let desc = match caption {
                 Some(c) => format!("[User sent a photo: {url}]\nCaption: {c}"),
                 None => format!("[User sent a photo: {url}]"),
             };
             desc
         }
-        ChannelContent::File { ref url, ref filename } => {
+        ChannelContent::File {
+            ref url,
+            ref filename,
+        } => {
             format!("[User sent a file ({filename}): {url}]")
         }
-        ChannelContent::Voice { ref url, duration_seconds } => {
+        ChannelContent::Voice {
+            ref url,
+            duration_seconds,
+        } => {
             format!("[User sent a voice message ({duration_seconds}s): {url}]")
         }
         ChannelContent::Location { lat, lon } => {
@@ -480,6 +1201,12 @@ async fn dispatch_message(
         } else {
             vec![]
         };
+
+        if cmd == "room" {
+            let result = handle_room_command(&args, handle, router, message, &room_defaults).await;
+            send_response(adapter, &message.sender, result, thread_id, output_format).await;
+            return;
+        }
 
         if matches!(
             cmd,
@@ -516,6 +1243,22 @@ async fn dispatch_message(
             return;
         }
         // Other slash commands pass through to the agent
+    }
+
+    if dispatch_group_room_message(
+        message,
+        &text,
+        handle,
+        router,
+        adapter,
+        ct_str,
+        thread_id,
+        output_format,
+        &room_defaults,
+    )
+    .await
+    {
+        return;
     }
 
     // Check broadcast routing first
@@ -705,7 +1448,9 @@ async fn handle_command(
                     msg.push_str(&format!("  - {name}\n"));
                 }
             }
-            msg.push_str("\nCommands:\n/agents - list agents\n/agent <name> - select an agent\n/help - show this help");
+            msg.push_str(
+                "\nCommands:\n/agents - list agents\n/agent <name> - select an agent\n/room status - show group room routing state\n/help - show this help",
+            );
             msg
         }
         "help" => "OpenFang Bot Commands:\n\
@@ -713,6 +1458,9 @@ async fn handle_command(
              Session:\n\
              /agents - list running agents\n\
              /agent <name> - select which agent to talk to\n\
+             /room status - show group room routing state\n\
+             /room mode <active|panel|orchestrator> - set room mode\n\
+             /room active <agent> - set active room agent\n\
              /new - reset session (clear messages)\n\
              /compact - trigger LLM session compaction\n\
              /model [name] - show or switch agent model\n\
@@ -1105,6 +1853,76 @@ mod tests {
         assert!(limiter.check("telegram", "user1", 3).is_err());
         // user2 should still be ok
         assert!(limiter.check("telegram", "user2", 3).is_ok());
+    }
+
+    #[test]
+    fn test_conversation_key_uses_room_and_thread() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("chat_id".to_string(), serde_json::json!("room-123"));
+        let msg = ChannelMessage {
+            channel: ChannelType::Telegram,
+            platform_message_id: "m1".to_string(),
+            sender: ChannelUser {
+                platform_id: "u1".to_string(),
+                display_name: "User".to_string(),
+                openfang_user: None,
+            },
+            content: ChannelContent::Text("hi".to_string()),
+            target_agent: None,
+            timestamp: chrono::Utc::now(),
+            is_group: true,
+            thread_id: Some("thread-9".to_string()),
+            metadata,
+        };
+        assert_eq!(
+            conversation_key_for_message(&msg).as_deref(),
+            Some("telegram:room-123:thread:thread-9")
+        );
+    }
+
+    #[test]
+    fn test_extract_mentioned_agent_names() {
+        let a = AgentId::new();
+        let b = AgentId::new();
+        let agents = vec![
+            (a, "Data Analyst".to_string()),
+            (b, "coder_bot".to_string()),
+        ];
+        let text = "@data-analyst can you check this? also @coder_bot please.";
+        let mentions = extract_mentioned_agent_names(text, &agents);
+        assert_eq!(
+            mentions,
+            vec!["Data Analyst".to_string(), "coder_bot".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_transcript_trim_caps_lines_and_size() {
+        let mut state = ConversationState::default();
+        for i in 0..120 {
+            push_transcript_line(&mut state, "user", &format!("message {i}"));
+        }
+        assert!(state.transcript.len() <= ROOM_TRANSCRIPT_MAX_LINES);
+        let total_chars: usize = state
+            .transcript
+            .iter()
+            .map(|line| line.chars().count())
+            .sum();
+        assert!(total_chars <= ROOM_TRANSCRIPT_MAX_CHARS);
+    }
+
+    #[test]
+    fn test_build_room_agent_prompt_includes_shared_transcript() {
+        let mut state = ConversationState::default();
+        push_transcript_line(&mut state, "user[Alice]", "Need a deployment checklist");
+        push_transcript_line(&mut state, "ops", "I can cover rollout and rollback");
+
+        let prompt = build_room_agent_prompt(&state, "coder", "Add the app migration steps too");
+
+        assert!(prompt.contains("Shared room transcript"));
+        assert!(prompt.contains("user[Alice]: Need a deployment checklist"));
+        assert!(prompt.contains("ops: I can cover rollout and rollback"));
+        assert!(prompt.contains("Current user message:\nAdd the app migration steps too"));
     }
 
     #[test]
