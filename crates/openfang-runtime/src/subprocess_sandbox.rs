@@ -208,22 +208,17 @@ pub async fn kill_process_tree(pid: u32, grace_ms: u64) -> Result<bool, String> 
 async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
     use tokio::process::Command;
 
-    let pid_i32 = pid as i32;
-
-    // Try to kill the process group first (negative PID).
-    // This kills the process and all its children.
-    let group_kill = Command::new("kill")
-        .args(["-TERM", &format!("-{pid_i32}")])
+    // Avoid signaling a negative PID / process group here. Even with process
+    // groups isolated on spawn, explicit parent/child cleanup is safer and
+    // cannot accidentally hit an unrelated runner/session group.
+    let _ = Command::new("pkill")
+        .args(["-TERM", "-P", &pid.to_string()])
         .output()
         .await;
-
-    if group_kill.is_err() {
-        // Fallback: kill just the process.
-        let _ = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output()
-            .await;
-    }
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .output()
+        .await;
 
     // Wait for grace period.
     tokio::time::sleep(std::time::Duration::from_millis(grace_ms)).await;
@@ -242,13 +237,10 @@ async fn kill_tree_unix(pid: u32, grace_ms: u64) -> Result<bool, String> {
                 "Process still alive after grace period, sending SIGKILL"
             );
 
-            // Try group kill first.
-            let _ = Command::new("kill")
-                .args(["-9", &format!("-{pid_i32}")])
+            let _ = Command::new("pkill")
+                .args(["-9", "-P", &pid.to_string()])
                 .output()
                 .await;
-
-            // Also try direct kill.
             let _ = Command::new("kill")
                 .args(["-9", &pid.to_string()])
                 .output()
