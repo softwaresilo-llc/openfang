@@ -118,6 +118,8 @@ pub struct ChatRoomsConfig {
     pub respond_without_mention: bool,
     /// Maximum number of agents allowed to respond per room turn.
     pub max_active_agents: usize,
+    /// Maximum autonomous room turns per `/room auto-discussion` run.
+    pub auto_discussion_max_turns: usize,
 }
 
 impl Default for ChatRoomsConfig {
@@ -128,6 +130,7 @@ impl Default for ChatRoomsConfig {
             default_requires_mention: true,
             respond_without_mention: true,
             max_active_agents: 3,
+            auto_discussion_max_turns: 1000,
         }
     }
 }
@@ -166,12 +169,41 @@ impl VoiceLanguage {
     }
 }
 
+/// Preferred TTS backend for channel voice replies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceTtsProvider {
+    /// Use global/default provider auto-detection.
+    #[default]
+    Auto,
+    /// Force local synthesis.
+    Local,
+    /// Force OpenAI-compatible TTS.
+    Openai,
+    /// Force ElevenLabs-compatible TTS.
+    Elevenlabs,
+}
+
+impl VoiceTtsProvider {
+    /// Return runtime provider override string (None => use default cascade).
+    pub fn as_provider_override(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Local => Some("local"),
+            Self::Openai => Some("openai"),
+            Self::Elevenlabs => Some("elevenlabs"),
+        }
+    }
+}
+
 /// Channel voice configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelVoiceConfig {
     /// Voice reply policy.
     pub reply_mode: VoiceReplyMode,
+    /// TTS backend used for synthesized channel replies.
+    pub tts_provider: VoiceTtsProvider,
     /// Default language for synthesized replies.
     pub default_language: VoiceLanguage,
     /// Auto mode threshold: synthesize when reply length >= this value.
@@ -184,6 +216,7 @@ impl Default for ChannelVoiceConfig {
     fn default() -> Self {
         Self {
             reply_mode: VoiceReplyMode::Off,
+            tts_provider: VoiceTtsProvider::Auto,
             default_language: VoiceLanguage::De,
             auto_min_text_length: 120,
             auto_keywords: Vec::new(),
@@ -3374,6 +3407,13 @@ impl KernelConfig {
         } else if self.chat_rooms.max_active_agents > 16 {
             self.chat_rooms.max_active_agents = 16;
         }
+
+        // Chat room auto-discussion max turns: min 1, max 100_000
+        if self.chat_rooms.auto_discussion_max_turns == 0 {
+            self.chat_rooms.auto_discussion_max_turns = 1000;
+        } else if self.chat_rooms.auto_discussion_max_turns > 100_000 {
+            self.chat_rooms.auto_discussion_max_turns = 100_000;
+        }
     }
 }
 
@@ -3538,6 +3578,7 @@ mod tests {
     fn test_whatsapp_voice_config_serde() {
         let cfg = ChannelVoiceConfig {
             reply_mode: VoiceReplyMode::Auto,
+            tts_provider: VoiceTtsProvider::Local,
             default_language: VoiceLanguage::En,
             auto_min_text_length: 80,
             auto_keywords: vec!["status".to_string(), "report".to_string()],
@@ -3545,6 +3586,7 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ChannelVoiceConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.reply_mode, VoiceReplyMode::Auto);
+        assert_eq!(back.tts_provider, VoiceTtsProvider::Local);
         assert_eq!(back.default_language, VoiceLanguage::En);
         assert_eq!(back.auto_min_text_length, 80);
         assert_eq!(back.auto_keywords, vec!["status", "report"]);
