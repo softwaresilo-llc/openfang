@@ -7,10 +7,14 @@
 pub mod anthropic;
 pub mod bedrock;
 pub mod claude_code;
+pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
 pub mod gemini;
+pub mod gemini_cli;
+pub mod kilocode_cli;
 pub mod openai;
+pub mod opencode_cli;
 pub mod qwen_code;
 pub mod vertex;
 
@@ -149,6 +153,26 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             key_required: true,
         }),
         "claude-code" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "codex-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "gemini-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "opencode-cli" => Some(ProviderDefaults {
+            base_url: "",
+            api_key_env: "",
+            key_required: false,
+        }),
+        "kilocode-cli" => Some(ProviderDefaults {
             base_url: "",
             api_key_env: "",
             key_required: false,
@@ -340,6 +364,24 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         )));
     }
 
+    // Generic CLI providers — subprocess-based, no API key required.
+    if provider == "codex-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(codex_cli::CodexCliDriver::new(cli_path)));
+    }
+    if provider == "gemini-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(gemini_cli::GeminiCliDriver::new(cli_path)));
+    }
+    if provider == "opencode-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(opencode_cli::OpenCodeCliDriver::new(cli_path)));
+    }
+    if provider == "kilocode-cli" {
+        let cli_path = config.base_url.clone();
+        return Ok(Arc::new(kilocode_cli::KiloCodeCliDriver::new(cli_path)));
+    }
+
     // GitHub Copilot — OAuth device flow + OpenAI-compatible completions.
     // Authentication is handled automatically via persisted tokens from the device flow.
     // Run `openfang config set-key github-copilot` to authenticate.
@@ -503,7 +545,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, gemini, openai, azure, bedrock, groq, \
              openrouter, deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, \
              perplexity, cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, \
-             github-copilot, chutes, venice, nvidia, codex, claude-code. \
+             github-copilot, chutes, venice, nvidia, novita, codex, claude-code, qwen-code, \
+             codex-cli, gemini-cli, opencode-cli, kilocode-cli, vertex. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
@@ -608,6 +651,10 @@ pub fn known_providers() -> &'static [&'static str] {
         "claude-code",
         "qwen-code",
         "azure",
+        "codex-cli",
+        "gemini-cli",
+        "opencode-cli",
+        "kilocode-cli",
     ]
 }
 
@@ -713,7 +760,11 @@ mod tests {
         assert!(providers.contains(&"claude-code"));
         assert!(providers.contains(&"qwen-code"));
         assert!(providers.contains(&"azure"));
-        assert_eq!(providers.len(), 38);
+        assert!(providers.contains(&"codex-cli"));
+        assert!(providers.contains(&"gemini-cli"));
+        assert!(providers.contains(&"opencode-cli"));
+        assert!(providers.contains(&"kilocode-cli"));
+        assert_eq!(providers.len(), 42);
     }
 
     #[test]
