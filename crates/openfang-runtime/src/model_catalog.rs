@@ -57,10 +57,19 @@ impl ModelCatalog {
     /// Only checks presence — never reads or stores the actual secret.
     pub fn detect_auth(&mut self) {
         for provider in &mut self.providers {
-            // Claude Code is special: no API key needed, but we probe for CLI
-            // installation so the dashboard shows "Configured" vs "Not Installed".
-            if provider.id == "claude-code" {
-                provider.auth_status = if crate::drivers::claude_code::claude_code_available() {
+            if matches!(
+                provider.id.as_str(),
+                "claude-code" | "codex-cli" | "gemini-cli" | "opencode-cli" | "kilocode-cli"
+            ) {
+                let available = match provider.id.as_str() {
+                    "claude-code" => crate::drivers::claude_code::claude_code_available(),
+                    "codex-cli" => crate::drivers::codex_cli::codex_cli_available(),
+                    "gemini-cli" => crate::drivers::gemini_cli::gemini_cli_available(),
+                    "opencode-cli" => crate::drivers::opencode_cli::opencode_cli_available(),
+                    "kilocode-cli" => crate::drivers::kilocode_cli::kilocode_cli_available(),
+                    _ => false,
+                };
+                provider.auth_status = if available {
                     AuthStatus::Configured
                 } else {
                     AuthStatus::Missing
@@ -851,6 +860,42 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             auth_status: AuthStatus::NotRequired,
             model_count: 0,
         },
+        ProviderInfo {
+            id: "codex-cli".into(),
+            display_name: "Codex CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "gemini-cli".into(),
+            display_name: "Gemini CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "opencode-cli".into(),
+            display_name: "OpenCode CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
+        ProviderInfo {
+            id: "kilocode-cli".into(),
+            display_name: "KiloCode CLI".into(),
+            api_key_env: String::new(),
+            base_url: String::new(),
+            key_required: false,
+            auth_status: AuthStatus::NotRequired,
+            model_count: 0,
+        },
     ]
 }
 
@@ -939,6 +984,10 @@ fn builtin_aliases() -> HashMap<String, String> {
         ),
         ("free", "openrouter/meta-llama/llama-3.1-8b-instruct:free"),
         ("free-reasoning", "openrouter/deepseek/deepseek-r1:free"),
+        ("codex-cli", "codex-cli/default"),
+        ("gemini-cli", "gemini-cli/default"),
+        ("opencode-cli", "opencode-cli/default"),
+        ("kilocode-cli", "kilocode-cli/default"),
     ];
     pairs
         .into_iter()
@@ -3646,6 +3695,62 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             supports_streaming: true,
             aliases: vec!["claude-code-haiku".into()],
         },
+        ModelCatalogEntry {
+            id: "codex-cli/default".into(),
+            display_name: "Codex CLI (Default Model)".into(),
+            provider: "codex-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["codex-cli".into()],
+        },
+        ModelCatalogEntry {
+            id: "gemini-cli/default".into(),
+            display_name: "Gemini CLI (Default Model)".into(),
+            provider: "gemini-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 1_000_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["gemini-cli".into()],
+        },
+        ModelCatalogEntry {
+            id: "opencode-cli/default".into(),
+            display_name: "OpenCode CLI (Default Model)".into(),
+            provider: "opencode-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["opencode-cli".into()],
+        },
+        ModelCatalogEntry {
+            id: "kilocode-cli/default".into(),
+            display_name: "KiloCode CLI (Default Model)".into(),
+            provider: "kilocode-cli".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 64_000,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: false,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["kilocode-cli".into()],
+        },
         // ══════════════════════════════════════════════════════════════
         // Qwen Code CLI (3) — subprocess-based, free via Qwen OAuth
         // ══════════════════════════════════════════════════════════════
@@ -4343,5 +4448,26 @@ mod tests {
         let lower = catalog.find_model("custom-model-7b").unwrap();
         assert_eq!(lower.tier, ModelTier::Local);
         assert_eq!(lower.provider, "ollama");
+    }
+
+    #[test]
+    fn test_cli_provider_aliases() {
+        let catalog = ModelCatalog::new();
+        assert_eq!(
+            catalog.find_model("codex-cli").unwrap().id,
+            "codex-cli/default"
+        );
+        assert_eq!(
+            catalog.find_model("gemini-cli").unwrap().id,
+            "gemini-cli/default"
+        );
+        assert_eq!(
+            catalog.find_model("opencode-cli").unwrap().id,
+            "opencode-cli/default"
+        );
+        assert_eq!(
+            catalog.find_model("kilocode-cli").unwrap().id,
+            "kilocode-cli/default"
+        );
     }
 }
