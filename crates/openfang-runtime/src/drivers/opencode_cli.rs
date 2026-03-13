@@ -200,7 +200,10 @@ impl LlmDriver for OpenCodeCliDriver {
         }
 
         Ok(CompletionResponse {
-            content: vec![ContentBlock::Text { text }],
+            content: vec![ContentBlock::Text {
+                text,
+                provider_metadata: None,
+            }],
             stop_reason: StopReason::EndTurn,
             tool_calls: Vec::new(),
             usage,
