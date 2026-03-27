@@ -145,8 +145,7 @@ impl MessageContent {
                     ContentBlock::ToolUse { name, input, .. } => {
                         name.len() + input.to_string().len()
                     }
-                    ContentBlock::Image { .. }
-                    | ContentBlock::Unknown => 0,
+                    ContentBlock::Image { .. } | ContentBlock::Unknown => 0,
                 })
                 .sum(),
         }
