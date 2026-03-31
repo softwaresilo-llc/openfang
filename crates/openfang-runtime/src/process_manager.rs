@@ -84,11 +84,20 @@ impl ProcessManager {
             ));
         }
 
-        let mut child = tokio::process::Command::new(command)
-            .args(args)
+        let mut cmd = tokio::process::Command::new(command);
+        cmd.args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        #[cfg(unix)]
+        {
+            // Isolate managed subprocesses in their own group so cleanup never
+            // targets the parent runner/session group by mistake.
+            cmd.process_group(0);
+        }
+
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("Failed to start process '{}': {}", command, e))?;
 

@@ -7,6 +7,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use dashmap::DashMap;
 use openfang_channels::bridge::channel_command_specs;
+use openfang_kernel::error::KernelError;
 use openfang_kernel::triggers::{TriggerId, TriggerPattern};
 use openfang_kernel::workflow::{
     ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
@@ -6941,9 +6942,15 @@ pub async fn clear_agent_history(
     }
     match state.kernel.clear_agent_history(agent_id) {
         Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "ok", "message": "All history cleared"})),
+            StatusCode::NO_CONTENT,
+            Json(serde_json::json!({})),
         ),
+        Err(KernelError::OpenFang(openfang_types::error::OpenFangError::AgentNotFound(_))) => {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("{e}")})),
